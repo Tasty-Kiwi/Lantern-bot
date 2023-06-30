@@ -79,7 +79,7 @@ async def search(interaction: nextcord.Interaction, query: str,
     
     await interaction.send("Search results from <https://www.radio-browser.info/>", embeds=embeds)
 
-@bot.slash_command(dm_permission=False, guild_ids=[config["testing_guild_ids"]])
+@bot.slash_command(dm_permission=False, guild_ids=config["testing_guild_ids"])
 async def play(interaction: nextcord.Interaction, query: str):
     if not interaction.guild.voice_client:
         player = await interaction.user.voice.channel.connect(cls=mafic.Player)
@@ -100,7 +100,7 @@ async def play(interaction: nextcord.Interaction, query: str):
 
     await interaction.send(embed=embed)
 
-@bot.slash_command(dm_permission=False, description="Annoy your friends by using TTS!", guild_ids=[config["testing_guild_ids"]])
+@bot.slash_command(dm_permission=False, description="Annoy your friends by using TTS!", guild_ids=config["testing_guild_ids"])
 async def vc_tts(interaction: nextcord.Interaction, query: str):
     if not interaction.guild.voice_client:
         player = await interaction.user.voice.channel.connect(cls=mafic.Player)
