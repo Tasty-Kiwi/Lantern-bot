@@ -1,0 +1,33 @@
+{
+  "wikipediaSelections": [
+    { "name": "English", "value": "en" },
+    { "name": "Lithuanian", "value": "lt" },
+    { "name": "Russian", "value": "ru" },
+    { "name": "Samogitian", "value": "bat-smg" },
+    { "name": "Polish", "value": "pl" },
+    { "name": "Ukrainian", "value": "uk" },
+    { "name": "Greek", "value": "el" },
+    { "name": "Croatian", "value": "hr" },
+    { "name": "Turkish", "value": "tr" },
+    { "name": "German", "value": "de" },
+    { "name": "Romanian", "value": "ro" },
+    { "name": "Tagalog", "value": "tl" },
+    { "name": "Indonesian", "value": "id" }
+  ],
+  "wikiSelections": [
+    { "name": "Wikipedia", "value": "wikipedia" },
+    { "name": "Wikivoyage", "value": "wikivoyage" },
+    { "name": "Wikiversity", "value": "Wikiversity" },
+    { "name": "Wikiquote", "value": "wikiquote" }
+  ],
+  "fandomSelections": [
+    { "name": "Esolang wiki", "value": 0 },
+    { "name": "LGBTA+ wiki", "value": 1 },
+    { "name": "GTA wiki", "value": 2 }
+  ],
+  "fandomUris": [
+    "https://esolangs.org/wiki/Special:Random",
+    "https://www.lgbtqia.wiki/wiki/Special:Random",
+    "https://www.grandtheftwiki.com/Special:Random"
+  ]
+}
