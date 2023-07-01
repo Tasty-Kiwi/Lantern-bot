@@ -7,7 +7,7 @@ from pyradios import RadioBrowser
 
 with open("config.toml", "rb") as f:
     config = tomllib.load(f)
-
+    
 class MyBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -23,8 +23,46 @@ class MyBot(commands.Bot):
             password=config["lavalink"]["password"],
         )
 
-bot = MyBot(intents=nextcord.Intents(guilds=True, voice_states=True))
 rb = RadioBrowser()
+
+class Dropdown(nextcord.ui.Select):
+    def __init__(self, results):
+        options = []
+        for result in results:
+            options.append(nextcord.SelectOption(
+                label=f"{result['name']} [{result['codec']}]", description=f"@ {result['bitrate']} kbps, tags: {', '.join(result['tags'].split(',')[:5])}",
+                value=result["stationuuid"][:3] + result["url"]
+            ))
+        super().__init__(
+            placeholder="Choose a radio station here",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: nextcord.Interaction):
+        if not interaction.guild.voice_client:
+            player = await interaction.user.voice.channel.connect(cls=mafic.Player)
+        else:
+            player = interaction.guild.voice_client
+        
+        # TODO: make proper duplicate detection later instead of goofy ahh string stuff
+        tracks = await player.fetch_tracks(self.values[0][3:])
+
+        if not tracks:
+            return await interaction.send("No tracks found.")
+
+        track = tracks[0]
+
+        await player.play(track)
+    
+        embed = nextcord.Embed(title=track.title, url=track.uri, color=nextcord.Color.orange())
+        embed.set_author(name="Now playing:")
+        embed.add_field(name="Played by:", value=interaction.user.name, inline=False)
+
+        await interaction.send(embed=embed)
+
+bot = MyBot(intents=nextcord.Intents(guilds=True, voice_states=True))
 
 @bot.slash_command(dm_permission=False, guild_ids=config["testing_guild_ids"], description="main command")
 async def radio(interaction: nextcord.Interaction):
@@ -32,30 +70,15 @@ async def radio(interaction: nextcord.Interaction):
 
 @radio.subcommand(description="Play a radio station")
 async def play(interaction: nextcord.Interaction, query: str):
-    if not interaction.guild.voice_client:
-        player = await interaction.user.voice.channel.connect(cls=mafic.Player)
-    else:
-        player = interaction.guild.voice_client
-
-    # TODO: fix
-    #if not query.startswith("http://") or not query.startswith("https://"):
-    #    return await interaction.send("Please provide a valid URL.")
+    results = rb.search(name=query, limit=10)
+    if len(results) < 1:
+        return await interaction.send("No stations found!")
     
-    tracks = await player.fetch_tracks(query)
+    view = nextcord.ui.View()
+    view.add_item(Dropdown(results))
+    await interaction.send("Pick a radio station:", view=view)
 
-    if not tracks:
-        return await interaction.send("No tracks found.")
-
-    track = tracks[0]
-
-    await player.play(track)
-    
-    embed = nextcord.Embed(title=track.title, url=track.uri, color=nextcord.Color.orange())
-    embed.set_author(name="Radio player")
-
-    await interaction.send(embed=embed)
-
-@radio.subcommand(description="Search for radio stations in Icecast radio directory")
+@radio.subcommand(description="Search for radio stations in radio-browser.info")
 async def search(interaction: nextcord.Interaction, query: str,
         limit: int = nextcord.SlashOption(
         name="limit",
