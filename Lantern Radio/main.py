@@ -123,6 +123,16 @@ async def play(interaction: nextcord.Interaction, query: str):
 
     await interaction.send(embed=embed)
 
+@bot.slash_command(dm_permission=False, description="Set the volume for the bot.", guild_ids=config["testing_guild_ids"])
+async def volume(interaction: nextcord.Interaction, query: int):
+    if not interaction.guild.voice_client:
+        player = await interaction.user.voice.channel.connect(cls=mafic.Player)
+    else:
+        player = interaction.guild.voice_client
+    
+    await player.set_volume(query)
+    await interaction.send(f"Volume set to {query}%!")
+
 @bot.slash_command(dm_permission=False, description="Annoy your friends by using TTS!", guild_ids=config["testing_guild_ids"])
 async def vc_tts(interaction: nextcord.Interaction, query: str):
     if not interaction.guild.voice_client:
@@ -150,7 +160,7 @@ async def stop(interaction: nextcord.Interaction):
     else:
         await interaction.send("No player detected")
 
-@bot.slash_command(description="Disconect the bot from the voice channel.", guild_ids=config["testing_guild_ids"])
+@bot.slash_command(dm_permission=False, description="Disconect the bot from the voice channel.", guild_ids=config["testing_guild_ids"])
 async def disconnect(interaction: nextcord.Interaction):
     if interaction.guild.voice_client:
         player = interaction.guild.voice_client
