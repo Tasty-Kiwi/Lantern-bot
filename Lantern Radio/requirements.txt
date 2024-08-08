@@ -1,3 +1,2 @@
-pyradios
 mafic
 nextcord[speed]
