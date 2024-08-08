@@ -2,17 +2,16 @@
   "wikipediaSelections": [
     { "name": "English", "value": "en" },
     { "name": "Lithuanian", "value": "lt" },
-    { "name": "Russian", "value": "ru" },
     { "name": "Samogitian", "value": "bat-smg" },
-    { "name": "Polish", "value": "pl" },
     { "name": "Ukrainian", "value": "uk" },
+    { "name": "Polish", "value": "pl" },
     { "name": "Greek", "value": "el" },
-    { "name": "Croatian", "value": "hr" },
     { "name": "Turkish", "value": "tr" },
     { "name": "German", "value": "de" },
     { "name": "Romanian", "value": "ro" },
     { "name": "Tagalog", "value": "tl" },
-    { "name": "Indonesian", "value": "id" }
+    { "name": "Indonesian", "value": "id" },
+    { "name": "Russian", "value": "ru" }
   ],
   "wikiSelections": [
     { "name": "Wikipedia", "value": "wikipedia" },
