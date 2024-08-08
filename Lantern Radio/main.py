@@ -171,7 +171,11 @@ async def disconnect(interaction: nextcord.Interaction):
 
 @bot.slash_command(description="Returns information about the bot", guild_ids=config["testing_guild_ids"])
 async def about(interaction: nextcord.Interaction):
-    embed = nextcord.Embed(title="Lantern Radio", color=0xdc141a, description="Copyright © tasty kiwi 2023. Powered by Nextcord and Mafic.")
+    embed = nextcord.Embed(
+        title="Lantern Radio",
+        color=0xDC141A,
+        description="Copyright © tasty kiwi 2024. Powered by Nextcord and Mafic.",
+    )
     await interaction.send(embed=embed)
 
 @bot.event

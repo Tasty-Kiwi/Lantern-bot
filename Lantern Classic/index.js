@@ -50,7 +50,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setColor(0x0c131f)
           .setTitle("Lantern")
           .setDescription(
-            "Copyright © tasty kiwi 2021 - 2023. Powered by Discord.js and cheerio."
+            "Copyright © tasty kiwi 2021 - 2024. Powered by Discord.js and cheerio."
           )
           .setFooter({ text: "Version 4.1.1" })
         await interaction.reply({ embeds: [embed_about] })
@@ -86,7 +86,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               randomWikiHandler(interaction)
               break
             case "embed":
-              embedWikiHandler(interaction)
+              embedWikiHandler(interaction) 
               break
           }
         } else {
