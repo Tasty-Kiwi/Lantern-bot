@@ -1,2 +1,2 @@
 mafic
-nextcord[speed]
+nextcord[speed] ~= 2.0
