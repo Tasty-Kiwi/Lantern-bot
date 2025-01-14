@@ -1,2 +1,3 @@
 mafic
+pyradios
 nextcord[speed] ~= 2.0
