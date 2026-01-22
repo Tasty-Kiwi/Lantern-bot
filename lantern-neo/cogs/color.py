@@ -111,7 +111,7 @@ class Color(commands.Cog):
                     name=color,
                     color=discord.Color(color_int),
                     permissions=discord.Permissions.none(),
-                    reason=f"Automatically created role for {color} color. Requested by {ctx.author}.",
+                    reason=f"Automatic color role. Requested by {ctx.author}.",
                 )
             except discord.HTTPException as e:
                 await ctx.respond(f"Failed to create role: {e}")
@@ -129,6 +129,7 @@ class Color(commands.Cog):
             title="Color changer",
             description=f"Color has been changed successfully to `{color}`\n:arrow_left: Role color preview",
             color=discord.Color(int(color, 16)),
+            ephemeral=True,
         )
         await ctx.respond(embed=embed)
 
@@ -148,7 +149,7 @@ class Color(commands.Cog):
         else:
             embed.description = "You do not have any colors selected!"
 
-        await ctx.respond(embed=embed)
+        await ctx.respond(embed=embed, ephemeral=True)
 
 
 def setup(bot):

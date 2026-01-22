@@ -99,7 +99,7 @@ class Sfx(commands.Cog):
         try:
             source = discord.FFmpegPCMAudio(sound_path)
             voice_client.play(source)
-            await ctx.respond(f"Playing `{sound}`")
+            await ctx.respond(f"Playing `{sound}`", ephemeral=True)
         except Exception as e:
             await ctx.respond(f"Error playing sound: {e}")
 
@@ -111,7 +111,7 @@ class Sfx(commands.Cog):
         if ctx.guild.voice_client:
             await ctx.guild.voice_client.disconnect()
             self.last_activity.pop(ctx.guild.id, None)
-            await ctx.respond("Disconnected.")
+            await ctx.respond("Disconnected.", ephemeral=True)
         else:
             await ctx.respond("I am not in a voice channel.", ephemeral=True)
 
