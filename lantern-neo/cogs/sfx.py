@@ -134,10 +134,10 @@ class Sfx(commands.Cog):
                 await voice_client.disconnect()
                 self.last_activity.pop(member.guild.id, None)
 
-    @tasks.loop(minutes=2)
+    @tasks.loop(minutes=1)
     async def timeout_check(self):
         """
-        Disconnects if no audio has played for 10 minutes.
+        Disconnects if no audio has played for 1 minute.
         """
         for vc in self.bot.voice_clients:
             guild_id = vc.guild.id
@@ -153,8 +153,8 @@ class Sfx(commands.Cog):
                     self.last_activity[guild_id] = datetime.datetime.now()
                     continue
 
-                # Check if 10 minutes (600 seconds) have passed
-                if (datetime.datetime.now() - last_active).total_seconds() > 600:
+                # Check if 1 minute (60 seconds) have passed
+                if (datetime.datetime.now() - last_active).total_seconds() > 60:
                     await vc.disconnect()
                     self.last_activity.pop(guild_id, None)
 
