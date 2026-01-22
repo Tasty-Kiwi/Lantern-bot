@@ -1,4 +1,4 @@
-nextcord
+py-cord
 python-dotenv
 webcolors
 PyNaCl

@@ -1,5 +1,5 @@
-import nextcord
-from nextcord.ext import commands
+import discord
+from discord.ext import commands
 import re
 import os
 import webcolors
@@ -17,7 +17,9 @@ class Color(commands.Cog):
         self.bot = bot
 
     async def _remove_color_roles(
-        self, interaction: nextcord.Interaction, member: nextcord.Member
+        self,
+        ctx: discord.ApplicationContext,
+        member: discord.Member,
     ):
         """
         Removes existing color roles from the user.
@@ -40,9 +42,9 @@ class Color(commands.Cog):
             if len(role.members) <= 1:
                 try:
                     await role.delete(
-                        reason=f"No one has the specified color role. Command requested by {interaction.user}."
+                        reason=f"No one has the specified color role. Command requested by {ctx.author}."
                     )
-                except nextcord.HTTPException:
+                except discord.HTTPException:
                     # If deletion fails (e.g. perms), at least remove the role from the member
                     await member.remove_roles(role, reason="Cleaning color role")
             else:
@@ -51,21 +53,16 @@ class Color(commands.Cog):
 
         return found_any
 
-    @nextcord.slash_command(
-        description="Color replacer module of Lantern", guild_ids=GUILD_IDS
+    color = discord.SlashCommandGroup(
+        "color", "Color replacer module of Lantern", guild_ids=GUILD_IDS
     )
-    async def color(self, interaction: nextcord.Interaction):
-        """
-        Base command for color operations.
-        """
-        pass
 
-    @color.subcommand(description="Creates a custom role with a color code.")
-    async def set(
+    @color.command(name="set", description="Creates a custom role with a color code.")
+    async def set_color(
         self,
-        interaction: nextcord.Interaction,
-        color: str = nextcord.SlashOption(
-            description="Color hex code (e.g. ff0000) or name (e.g. hotpink)"
+        ctx: discord.ApplicationContext,
+        color: str = discord.Option(
+            str, description="Color hex code (e.g. ff0000) or name (e.g. hotpink)"
         ),
     ):
         """
@@ -86,7 +83,7 @@ class Color(commands.Cog):
                 hex_value = webcolors.name_to_hex(original_input)
                 color = hex_value[1:]  # strip the #
             except ValueError:
-                await interaction.response.send_message(
+                await ctx.respond(
                     f"Received an invalid color: `{original_input}`. Please use a hex code (e.g. `ff0011`) or a valid [CSS3 color name](<https://www.w3schools.com/cssref/css_colors.php>) (e.g. `hotpink`).",
                     ephemeral=True,
                 )
@@ -97,61 +94,61 @@ class Color(commands.Cog):
             color = "010101"
 
         # Defer reply since role operations can take a moment
-        await interaction.response.defer()
+        await ctx.defer()
 
         # 3. Clean up old colors
-        await self._remove_color_roles(interaction, interaction.user)
+        await self._remove_color_roles(ctx, ctx.author)
 
         # 4. Find or Create Role
-        existing_role = nextcord.utils.get(interaction.guild.roles, name=color)
+        existing_role = discord.utils.get(ctx.guild.roles, name=color)
 
         target_role = existing_role
         if not target_role:
             try:
                 # Parse hex string to integer for color
                 color_int = int(color, 16)
-                target_role = await interaction.guild.create_role(
+                target_role = await ctx.guild.create_role(
                     name=color,
-                    color=nextcord.Color(color_int),
-                    permissions=nextcord.Permissions.none(),
-                    reason=f"Automatically created role for {color} color. Requested by {interaction.user}.",
+                    color=discord.Color(color_int),
+                    permissions=discord.Permissions.none(),
+                    reason=f"Automatically created role for {color} color. Requested by {ctx.author}.",
                 )
-            except nextcord.HTTPException as e:
-                await interaction.followup.send(f"Failed to create role: {e}")
+            except discord.HTTPException as e:
+                await ctx.respond(f"Failed to create role: {e}")
                 return
 
         # 5. Assign Role
         try:
-            await interaction.user.add_roles(target_role)
-        except nextcord.HTTPException as e:
-            await interaction.followup.send(f"Failed to assign role: {e}")
+            await ctx.author.add_roles(target_role)
+        except discord.HTTPException as e:
+            await ctx.respond(f"Failed to assign role: {e}")
             return
 
         # 6. Response
-        embed = nextcord.Embed(
+        embed = discord.Embed(
             title="Color changer",
             description=f"Color has been changed successfully to `{color}`\n:arrow_left: Role color preview",
-            color=nextcord.Color(int(color, 16)),
+            color=discord.Color(int(color, 16)),
         )
-        await interaction.followup.send(embed=embed)
+        await ctx.respond(embed=embed)
 
-    @color.subcommand(description="Clears a color from your profile.")
-    async def clear(self, interaction: nextcord.Interaction):
+    @color.command(description="Clears a color from your profile.")
+    async def clear(self, ctx: discord.ApplicationContext):
         """
         Removes your color role.
         """
-        await interaction.response.defer()
+        await ctx.defer()
 
-        removed = await self._remove_color_roles(interaction, interaction.user)
+        removed = await self._remove_color_roles(ctx, ctx.author)
 
-        embed = nextcord.Embed(title="Color changer", color=0x6B003B)
+        embed = discord.Embed(title="Color changer", color=0x6B003B)
 
         if removed:
             embed.description = "Color was removed successfully."
         else:
             embed.description = "You do not have any colors selected!"
 
-        await interaction.followup.send(embed=embed)
+        await ctx.respond(embed=embed)
 
 
 def setup(bot):

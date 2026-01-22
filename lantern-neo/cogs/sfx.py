@@ -1,5 +1,5 @@
-import nextcord
-from nextcord.ext import commands, tasks
+import discord
+from discord.ext import commands, tasks
 import os
 import datetime
 
@@ -8,6 +8,24 @@ GUILD_ID = os.getenv("GUILD_ID")
 GUILD_IDS = [int(GUILD_ID)] if GUILD_ID else None
 
 SFX_DIR = "sfx"
+
+
+def get_sound_files():
+    """Returns a list of available sound files (without extension)"""
+    if not os.path.exists(SFX_DIR):
+        return []
+    files = []
+    for f in os.listdir(SFX_DIR):
+        if f.endswith(".wav") or f.endswith(".mp3") or f.endswith(".ogg"):
+            files.append(os.path.splitext(f)[0])
+    return sorted(files)
+
+
+async def play_autocomplete(ctx: discord.AutocompleteContext):
+    all_sounds = get_sound_files()
+    if not ctx.value:
+        return all_sounds[:25]
+    return [s for s in all_sounds if ctx.value.lower() in s.lower()][:25]
 
 
 class Sfx(commands.Cog):
@@ -19,45 +37,27 @@ class Sfx(commands.Cog):
     def cog_unload(self):
         self.timeout_check.cancel()
 
-    def get_sound_files(self):
-        """Returns a list of available sound files (without extension)"""
-        if not os.path.exists(SFX_DIR):
-            return []
-        files = []
-        for f in os.listdir(SFX_DIR):
-            if f.endswith(".wav") or f.endswith(".mp3"):
-                files.append(os.path.splitext(f)[0])
-        return sorted(files)
+    sfx = discord.SlashCommandGroup("sfx", "Sound effects module", guild_ids=GUILD_IDS)
 
-    @nextcord.slash_command(
-        description="Sound effects module", guild_ids=GUILD_IDS
-    )
-    async def sfx(self, interaction: nextcord.Interaction):
-        """
-        Base command for SFX operations.
-        """
-        pass
-
-    @sfx.subcommand(description="Plays a sound effect.")
+    @sfx.command(description="Plays a sound effect.")
     async def play(
         self,
-        interaction: nextcord.Interaction,
-        sound: str = nextcord.SlashOption(
+        ctx: discord.ApplicationContext,
+        sound: str = discord.Option(
             description="The name of the sound to play",
-            required=True
+            autocomplete=play_autocomplete,
+            required=True,
         ),
     ):
         """
         Plays the specified sound effect in your voice channel.
         """
-        if not interaction.user.voice:
-            await interaction.response.send_message(
-                "You are not in a voice channel!", ephemeral=True
-            )
+        if not ctx.author.voice:
+            await ctx.respond("You are not in a voice channel!", ephemeral=True)
             return
 
-        if interaction.user.voice.deaf or interaction.user.voice.self_deaf:
-            await interaction.response.send_message(
+        if ctx.author.voice.deaf or ctx.author.voice.self_deaf:
+            await ctx.respond(
                 "You cannot play sound effects while deafened!", ephemeral=True
             )
             return
@@ -67,15 +67,15 @@ class Sfx(commands.Cog):
         if not os.path.exists(sound_path):
             sound_path = os.path.join(SFX_DIR, f"{sound}.mp3")
             if not os.path.exists(sound_path):
-                await interaction.response.send_message(
-                    f"Sound `{sound}` not found.", ephemeral=True
-                )
-                return
+                sound_path = os.path.join(SFX_DIR, f"{sound}.ogg")
+                if not os.path.exists(sound_path):
+                    await ctx.respond(f"Sound `{sound}` not found.", ephemeral=True)
+                    return
 
-        await interaction.response.defer()
+        await ctx.defer()
 
-        voice_channel = interaction.user.voice.channel
-        voice_client = interaction.guild.voice_client
+        voice_channel = ctx.author.voice.channel
+        voice_client = ctx.guild.voice_client
 
         # Connect or move
         if voice_client:
@@ -85,11 +85,11 @@ class Sfx(commands.Cog):
             try:
                 voice_client = await voice_channel.connect()
             except Exception as e:
-                await interaction.followup.send(f"Failed to connect to voice: {e}")
+                await ctx.respond(f"Failed to connect to voice: {e}")
                 return
 
         # Update activity timestamp
-        self.last_activity[interaction.guild.id] = datetime.datetime.now()
+        self.last_activity[ctx.guild.id] = datetime.datetime.now()
 
         # Stop any currently playing audio
         if voice_client.is_playing():
@@ -97,35 +97,23 @@ class Sfx(commands.Cog):
 
         # Play
         try:
-            source = nextcord.FFmpegPCMAudio(sound_path)
+            source = discord.FFmpegPCMAudio(sound_path)
             voice_client.play(source)
-            await interaction.followup.send(f"Playing `{sound}`")
+            await ctx.respond(f"Playing `{sound}`")
         except Exception as e:
-            await interaction.followup.send(f"Error playing sound: {e}")
+            await ctx.respond(f"Error playing sound: {e}")
 
-    @play.on_autocomplete("sound")
-    async def play_autocomplete(self, interaction: nextcord.Interaction, sound: str):
-        all_sounds = self.get_sound_files()
-        if not sound:
-            await interaction.response.send_autocomplete(all_sounds[:25])
-            return
-
-        filtered = [s for s in all_sounds if sound.lower() in s.lower()]
-        await interaction.response.send_autocomplete(filtered[:25])
-
-    @sfx.subcommand(description="Disconnects the bot from voice.")
-    async def leave(self, interaction: nextcord.Interaction):
+    @sfx.command(description="Disconnects the bot from voice.")
+    async def leave(self, ctx: discord.ApplicationContext):
         """
         Leaves the voice channel.
         """
-        if interaction.guild.voice_client:
-            await interaction.guild.voice_client.disconnect()
-            self.last_activity.pop(interaction.guild.id, None)
-            await interaction.response.send_message("Disconnected.")
+        if ctx.guild.voice_client:
+            await ctx.guild.voice_client.disconnect()
+            self.last_activity.pop(ctx.guild.id, None)
+            await ctx.respond("Disconnected.")
         else:
-            await interaction.response.send_message(
-                "I am not in a voice channel.", ephemeral=True
-            )
+            await ctx.respond("I am not in a voice channel.", ephemeral=True)
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -136,7 +124,7 @@ class Sfx(commands.Cog):
             return
 
         voice_client = member.guild.voice_client
-        
+
         # Check if the user left the channel the bot is in
         if voice_client and before.channel and before.channel == voice_client.channel:
             # If only 1 member is left, and it's the bot (handled by len check)
@@ -151,13 +139,13 @@ class Sfx(commands.Cog):
         """
         for vc in self.bot.voice_clients:
             guild_id = vc.guild.id
-            
+
             # If currently playing, update the activity timestamp
             if vc.is_playing():
                 self.last_activity[guild_id] = datetime.datetime.now()
             else:
                 last_active = self.last_activity.get(guild_id)
-                
+
                 # If we have no record, assume inactivity starts now
                 if last_active is None:
                     self.last_activity[guild_id] = datetime.datetime.now()

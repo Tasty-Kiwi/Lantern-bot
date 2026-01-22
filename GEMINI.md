@@ -6,7 +6,7 @@ A monorepo containing the Lantern family of Discord bots.
 
 *   **Lantern Classic:** A Node.js Discord bot (v14) focusing on utility features like Wiki searches, Fandom integration, and role color management.
 *   **Lantern Radio:** A Python Discord bot focusing on music/radio playback using Lavalink.
-*   **Lantern Neo:** A new generation Python Discord bot using `nextcord` and `.env` for configuration.
+*   **Lantern Neo:** A new generation Python Discord bot using `py-cord` and `.env` for configuration.
 
 ## Lantern Classic (Node.js)
 
@@ -94,7 +94,7 @@ The `lavalink/` directory contains the Lavalink server JAR and plugins.
 
 ### Prerequisites
 *   Python 3.11+
-*   `nextcord`, `python-dotenv`, `webcolors`
+*   `py-cord`, `python-dotenv`, `webcolors`
 
 ### Setup
 1.  Navigate to the directory:
@@ -138,6 +138,6 @@ The `lavalink/` directory contains the Lavalink server JAR and plugins.
     *   Uses `nextcord` and `mafic`.
     *   Uses `pyradios` for radio station lookup.
 *   **Lantern Neo:**
-    *   Uses `nextcord` and modular `cogs/` system for extensions.
+    *   Uses `py-cord` and modular `cogs/` system for extensions.
     *   Configuration managed via `.env`.
     *   Uses `webcolors` for robust color parsing.
