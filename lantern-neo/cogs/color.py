@@ -87,7 +87,7 @@ class Color(commands.Cog):
                 color = hex_value[1:]  # strip the #
             except ValueError:
                 await interaction.response.send_message(
-                    f"Received an invalid color: `{original_input}`. Please use a hex code (e.g. `ff0011`) or a valid CSS3 color name (e.g. `hotpink`).",
+                    f"Received an invalid color: `{original_input}`. Please use a hex code (e.g. `ff0011`) or a valid [CSS3 color name](<https://www.w3schools.com/cssref/css_colors.php>) (e.g. `hotpink`).",
                     ephemeral=True,
                 )
                 return

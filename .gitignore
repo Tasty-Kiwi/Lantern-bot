@@ -2,6 +2,7 @@
 lavalink/
 config.toml
 config.json
+sfx/
 
 # NODE
 # Logs
