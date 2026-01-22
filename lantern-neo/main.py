@@ -57,7 +57,7 @@ async def about(ctx: discord.ApplicationContext):
         description="Hi! I am Lantern Neo, a utility bot for various private servers.",
         color=discord.Color.blue(),
     ).set_footer(text="v2.0.1, © 2026 tasty kiwi")
-    await ctx.respond(embed=embed)
+    await ctx.send_response(embed=embed)
 
 
 if __name__ == "__main__":

@@ -83,7 +83,7 @@ class Color(commands.Cog):
                 hex_value = webcolors.name_to_hex(original_input)
                 color = hex_value[1:]  # strip the #
             except ValueError:
-                await ctx.respond(
+                await ctx.send_response(
                     f"Received an invalid color: `{original_input}`. Please use a hex code (e.g. `ff0011`) or a valid [CSS3 color name](<https://www.w3schools.com/cssref/css_colors.php>) (e.g. `hotpink`).",
                     ephemeral=True,
                 )
@@ -94,7 +94,7 @@ class Color(commands.Cog):
             color = "010101"
 
         # Defer reply since role operations can take a moment
-        await ctx.defer()
+        await ctx.defer(ephemeral=True)
 
         # 3. Clean up old colors
         await self._remove_color_roles(ctx, ctx.author)
@@ -114,14 +114,14 @@ class Color(commands.Cog):
                     reason=f"Automatic color role. Requested by {ctx.author}.",
                 )
             except discord.HTTPException as e:
-                await ctx.respond(f"Failed to create role: {e}")
+                await ctx.send_followup(f"Failed to create role: {e}")
                 return
 
         # 5. Assign Role
         try:
             await ctx.author.add_roles(target_role)
         except discord.HTTPException as e:
-            await ctx.respond(f"Failed to assign role: {e}")
+            await ctx.send_followup(f"Failed to assign role: {e}")
             return
 
         # 6. Response
@@ -129,16 +129,15 @@ class Color(commands.Cog):
             title="Color changer",
             description=f"Color has been changed successfully to `{color}`\n:arrow_left: Role color preview",
             color=discord.Color(int(color, 16)),
-            ephemeral=True,
         )
-        await ctx.respond(embed=embed)
+        await ctx.send_followup(embed=embed)
 
     @color.command(description="Clears a color from your profile.")
     async def clear(self, ctx: discord.ApplicationContext):
         """
         Removes your color role.
         """
-        await ctx.defer()
+        await ctx.defer(ephemeral=True)
 
         removed = await self._remove_color_roles(ctx, ctx.author)
 
@@ -149,7 +148,7 @@ class Color(commands.Cog):
         else:
             embed.description = "You do not have any colors selected!"
 
-        await ctx.respond(embed=embed, ephemeral=True)
+        await ctx.send_followup(embed=embed)
 
 
 def setup(bot):

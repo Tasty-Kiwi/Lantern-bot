@@ -53,11 +53,11 @@ class Sfx(commands.Cog):
         Plays the specified sound effect in your voice channel.
         """
         if not ctx.author.voice:
-            await ctx.respond("You are not in a voice channel!", ephemeral=True)
+            await ctx.send_response("You are not in a voice channel!", ephemeral=True)
             return
 
         if ctx.author.voice.deaf or ctx.author.voice.self_deaf:
-            await ctx.respond(
+            await ctx.send_response(
                 "You cannot play sound effects while deafened!", ephemeral=True
             )
             return
@@ -69,10 +69,12 @@ class Sfx(commands.Cog):
             if not os.path.exists(sound_path):
                 sound_path = os.path.join(SFX_DIR, f"{sound}.ogg")
                 if not os.path.exists(sound_path):
-                    await ctx.respond(f"Sound `{sound}` not found.", ephemeral=True)
+                    await ctx.send_response(
+                        f"Sound `{sound}` not found.", ephemeral=True
+                    )
                     return
 
-        await ctx.defer()
+        await ctx.defer(ephemeral=True)
 
         voice_channel = ctx.author.voice.channel
         voice_client = ctx.guild.voice_client
@@ -85,7 +87,7 @@ class Sfx(commands.Cog):
             try:
                 voice_client = await voice_channel.connect()
             except Exception as e:
-                await ctx.respond(f"Failed to connect to voice: {e}")
+                await ctx.send_followup(f"Failed to connect to voice: {e}")
                 return
 
         # Update activity timestamp
@@ -99,9 +101,9 @@ class Sfx(commands.Cog):
         try:
             source = discord.FFmpegPCMAudio(sound_path)
             voice_client.play(source)
-            await ctx.respond(f"Playing `{sound}`", ephemeral=True)
+            await ctx.send_followup(f"Playing `{sound}`")
         except Exception as e:
-            await ctx.respond(f"Error playing sound: {e}")
+            await ctx.send_followup(f"Error playing sound: {e}")
 
     @sfx.command(description="Disconnects the bot from voice.")
     async def leave(self, ctx: discord.ApplicationContext):
@@ -111,9 +113,9 @@ class Sfx(commands.Cog):
         if ctx.guild.voice_client:
             await ctx.guild.voice_client.disconnect()
             self.last_activity.pop(ctx.guild.id, None)
-            await ctx.respond("Disconnected.", ephemeral=True)
+            await ctx.send_response("Disconnected.", ephemeral=True)
         else:
-            await ctx.respond("I am not in a voice channel.", ephemeral=True)
+            await ctx.send_response("I am not in a voice channel.", ephemeral=True)
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
