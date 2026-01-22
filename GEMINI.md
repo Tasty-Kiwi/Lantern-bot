@@ -6,6 +6,7 @@ A monorepo containing the Lantern family of Discord bots.
 
 *   **Lantern Classic:** A Node.js Discord bot (v14) focusing on utility features like Wiki searches, Fandom integration, and role color management.
 *   **Lantern Radio:** A Python Discord bot focusing on music/radio playback using Lavalink.
+*   **Lantern Neo:** A new generation Python Discord bot using `nextcord` and `.env` for configuration.
 
 ## Lantern Classic (Node.js)
 
@@ -89,6 +90,45 @@ The `lavalink/` directory contains the Lavalink server JAR and plugins.
     python main.py
     ```
 
+## Lantern Neo (Python)
+
+### Prerequisites
+*   Python 3.11+
+*   `nextcord`, `python-dotenv`, `webcolors`
+
+### Setup
+1.  Navigate to the directory:
+    ```bash
+    cd lantern-neo
+    ```
+2.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+3.  Create a `.env` file in `lantern-neo/` with the following structure:
+    ```env
+    DISCORD_TOKEN=YOUR_DISCORD_BOT_TOKEN
+    GUILD_ID=1222610807989342279
+    ```
+
+### Features
+*   **Color Role Management:**
+    *   `/color set [code/name]`: Creates and assigns a custom color role to the user. Supports Hex codes (e.g., `ff0000`) and CSS3 color names (e.g., `hotpink`). automatically handles cleanup of unused roles.
+    *   `/color clear`: Removes the custom color role from the user.
+*   **Utility:**
+    *   `/about`: Displays information about the bot.
+
+### Structure
+*   **`main.py`**: Entry point. Initializes the bot, loads environment variables, and loads cogs from the `cogs/` directory.
+*   **`cogs/`**: Contains bot extensions (plugins).
+    *   `color.py`: Handles color role logic, including validation and role management.
+
+### Running the Bot
+1.  Start the bot:
+    ```bash
+    python main.py
+    ```
+
 ## Development Conventions
 *   **Lantern Classic:**
     *   Uses `discord.js` v14.
@@ -97,3 +137,7 @@ The `lavalink/` directory contains the Lavalink server JAR and plugins.
 *   **Lantern Radio:**
     *   Uses `nextcord` and `mafic`.
     *   Uses `pyradios` for radio station lookup.
+*   **Lantern Neo:**
+    *   Uses `nextcord` and modular `cogs/` system for extensions.
+    *   Configuration managed via `.env`.
+    *   Uses `webcolors` for robust color parsing.
