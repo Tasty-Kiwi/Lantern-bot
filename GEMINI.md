@@ -108,7 +108,7 @@ The `lavalink/` directory contains the Lavalink server JAR and plugins.
 3.  Create a `.env` file in `lantern-neo/` with the following structure:
     ```env
     DISCORD_TOKEN=YOUR_DISCORD_BOT_TOKEN
-    GUILD_ID=1222610807989342279
+    GUILD_ID=YOUR_TESTING_GUILD_ID
     ```
 
 ### Features
@@ -122,6 +122,7 @@ The `lavalink/` directory contains the Lavalink server JAR and plugins.
 *   **`main.py`**: Entry point. Initializes the bot, loads environment variables, and loads cogs from the `cogs/` directory.
 *   **`cogs/`**: Contains bot extensions (plugins).
     *   `color.py`: Handles color role logic, including validation and role management.
+    *   `sfx.py`: Handles sound effect (sub)commands and audio playback.
 
 ### Running the Bot
 1.  Start the bot:

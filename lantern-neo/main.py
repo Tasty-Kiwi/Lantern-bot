@@ -47,16 +47,16 @@ for filename in os.listdir("./cogs"):
         bot.load_extension(f"cogs.{filename[:-3]}")
 
 
-@bot.slash_command(description="About Lantern Neo", guild_ids=guild_ids)
+@bot.slash_command(description="About Lantern", guild_ids=guild_ids)
 async def about(ctx: discord.ApplicationContext):
     """
     Returns information about the bot.
     """
     embed = discord.Embed(
-        title="About Lantern Neo",
-        description="Hi! I am Lantern Neo, a utility bot for various private servers.",
+        title="About Lantern",
+        description="Hi! I am Lantern, a utility bot for various private servers.",
         color=discord.Color.blue(),
-    ).set_footer(text="v2.0.1, © 2026 tasty kiwi")
+    ).set_footer(text="v5.0.0, © 2026 tasty kiwi")
     await ctx.send_response(embed=embed)
 
 

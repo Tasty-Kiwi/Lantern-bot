@@ -127,7 +127,7 @@ class Color(commands.Cog):
         # 6. Response
         embed = discord.Embed(
             title="Color changer",
-            description=f"Color has been changed successfully to `{color}`\n:arrow_left: Role color preview",
+            description=f"Color has been changed to `{color}`.",
             color=discord.Color(int(color, 16)),
         )
         await ctx.send_followup(embed=embed)
@@ -144,7 +144,7 @@ class Color(commands.Cog):
         embed = discord.Embed(title="Color changer", color=0x6B003B)
 
         if removed:
-            embed.description = "Color was removed successfully."
+            embed.description = "Color was removed."
         else:
             embed.description = "You do not have any colors selected!"
 
