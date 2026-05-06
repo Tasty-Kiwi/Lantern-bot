@@ -1,6 +1,6 @@
 # Lantern
 
-A monorepo containing all Lantern bots.
+A utility Discord bot for private servers.
 
 ## License
 
