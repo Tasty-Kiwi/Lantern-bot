@@ -264,11 +264,12 @@ class SessionManager:
     def __init__(self):
         self.sessions = {}
         self.owners = {}
+        self.user_contexts = {}
 
     def get(self, session_id: int):
         return self.sessions.get(session_id)
 
-    def create(self, session_id: int, owner_id: int):
+    def create(self, session_id: int, owner_id: int, user_context: str | None = None):
         now = datetime.datetime.now(datetime.timezone.utc)
         date_msg = {
             "role": "system",
@@ -279,6 +280,8 @@ class SessionManager:
             date_msg,
         ]
         self.owners[session_id] = owner_id
+        if user_context:
+            self.user_contexts[session_id] = user_context
         return self.sessions[session_id]
 
     def add_message(self, session_id: int, msg: dict):
@@ -299,6 +302,7 @@ class SessionManager:
     def forget(self, session_id: int):
         self.sessions.pop(session_id, None)
         self.owners.pop(session_id, None)
+        self.user_contexts.pop(session_id, None)
 
     def has(self, session_id: int) -> bool:
         return session_id in self.sessions
@@ -325,8 +329,9 @@ class FollowUpModal(discord.ui.Modal):
         await interaction.response.defer()
         question = self.children[0].value
         self.cog.sessions.add_message(self.session_key, {"role": "user", "content": question})
+        channel = self.cog.bot.get_channel(self.channel_id)
         async with self.cog._lock:
-            response = await self.cog._get_ai_response(self.session_key, destination=None, author_id=self.user_id)
+            response = await self.cog._get_ai_response(self.session_key, destination=channel, author_id=self.user_id)
         formatted = f"<@{self.user_id}> asked:\n> {question[:500]}\n\n{response}"
         view = FollowUpView(self.cog, self.user_id, self.session_key, self.channel_id)
         await self.cog._send_long_message_follow(interaction, formatted, view=view)
@@ -591,6 +596,28 @@ class Chat(commands.Cog):
             return mcp_tools + builtin
         return builtin if builtin else None
 
+    def _build_user_context(self, guild, member_id: int) -> str | None:
+        if not guild:
+            return None
+        member = guild.get_member(member_id)
+        if not member:
+            return None
+        parts = [f"Discord ID: {member_id}", f"Username: {member.name}"]
+        if member.nick:
+            parts.append(f"Nickname: {member.nick}")
+        parts.append(f"Display name: {member.display_name}")
+        parts.append(f"Server: {guild.name}")
+        if member.guild_permissions.administrator:
+            parts.append("Role: Admin")
+        elif member.guild_permissions.manage_guild:
+            parts.append("Role: Moderator")
+        top_roles = [r.name for r in member.roles[-3:] if r.name != "@everyone"]
+        if top_roles:
+            parts.append(f"Roles: {', '.join(top_roles)}")
+        created_ago = (datetime.datetime.now(datetime.timezone.utc) - member.created_at).days
+        parts.append(f"Account age: {created_ago} days")
+        return " | ".join(parts)
+
     async def _send_long_message(self, destination, content: str):
         if not content:
             return
@@ -652,7 +679,7 @@ class Chat(commands.Cog):
             await ctx.send_followup(f"Failed to create thread: {e}")
             return
 
-        self.sessions.create(thread.id, ctx.author.id)
+        self.sessions.create(thread.id, ctx.author.id, user_context=self._build_user_context(ctx.guild, ctx.author.id))
         self.sessions.add_message(thread.id, {"role": "user", "content": message})
 
         async with self._lock:
@@ -684,11 +711,11 @@ class Chat(commands.Cog):
         print(f"[Ember] {ctx.author} (ID: {ctx.author.id}): /ai answer \"{message[:200]}\"")
 
         session_key = self._answer_session_key(ctx.author.id, ctx.channel_id)
-        self.sessions.create(session_key, ctx.author.id)
+        self.sessions.create(session_key, ctx.author.id, user_context=self._build_user_context(ctx.guild, ctx.author.id))
         self.sessions.add_message(session_key, {"role": "user", "content": message})
 
         async with self._lock:
-            response = await self._get_ai_response(session_key, destination=None, author_id=ctx.author.id)
+            response = await self._get_ai_response(session_key, destination=ctx.channel, author_id=ctx.author.id)
 
         view = FollowUpView(self, ctx.author.id, session_key, ctx.channel_id)
         await self._send_long_message_follow(ctx, response, view=view)
@@ -738,11 +765,32 @@ class Chat(commands.Cog):
             messages = self.sessions.get(session_id)
 
             ctx_parts = []
-            if author_id:
-                ctx_parts.append({
-                    "role": "system",
-                    "content": f"The user you are talking to has Discord ID {author_id}. Do NOT ask them for their ID \u2014 you already know it.",
-                })
+            stored_context = self.sessions.user_contexts.get(session_id)
+            if stored_context:
+                ctx_parts.append({"role": "system", "content": stored_context})
+
+            if destination:
+                guild = getattr(destination, "guild", None)
+                if guild and author_id:
+                    mentioned = set()
+                    for msg in messages:
+                        if msg.get("role") == "user":
+                            for uid in re.findall(r"<@!?(\d+)>", msg.get("content", "")):
+                                mentioned.add(int(uid))
+                    mentioned.discard(author_id)
+                    for uid in mentioned:
+                        m = guild.get_member(uid)
+                        if m:
+                            info = [f"Discord ID: {uid}", f"Username: {m.name}"]
+                            if m.nick:
+                                info.append(f"Nickname: {m.nick}")
+                            top_roles = [r.name for r in m.roles[-3:] if r.name != "@everyone"]
+                            if top_roles:
+                                info.append(f"Roles: {', '.join(top_roles)}")
+                            ctx_parts.append({
+                                "role": "system",
+                                "content": " | ".join(info),
+                            })
             ai_messages = messages + ctx_parts
 
             try:
