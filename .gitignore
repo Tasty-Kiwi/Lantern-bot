@@ -3,6 +3,8 @@ lavalink/
 config.toml
 config.json
 sfx/
+mcp.json
+.DS_Store
 
 # NODE
 # Logs

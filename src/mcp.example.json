@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "example": {
+      "url": "https://example-mcp-server.com/sse",
+      "transport": "sse",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY"
+      }
+    }
+  }
+}

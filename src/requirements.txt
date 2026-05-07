@@ -2,3 +2,5 @@ py-cord
 python-dotenv
 webcolors
 PyNaCl
+openai
+mcp

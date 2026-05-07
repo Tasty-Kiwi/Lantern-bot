@@ -4,7 +4,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 # Get environment variables
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -32,8 +32,10 @@ class LanternBot(commands.Bot):
 
 
 bot = LanternBot(
-    intents=discord.Intents(guilds=True, voice_states=True, members=True)
-)  # Added members=True for role management
+    intents=discord.Intents(
+        guilds=True, voice_states=True, members=True, messages=True, message_content=True
+    )
+)  # messages + message_content for chat cog
 
 
 @bot.event
