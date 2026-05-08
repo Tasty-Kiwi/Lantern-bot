@@ -20,15 +20,13 @@ GUILD_IDS = [int(GUILD_ID)] if GUILD_ID else None
 _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MCP_CONFIG_PATH = os.getenv("MCP_CONFIG") or os.path.join(_SRC_DIR, "mcp.json")
 
-SYSTEM_PROMPT = """You are Ember, a helpful AI assistant for a Discord community server. You are named after embers \u2014 warm, glowing remnants of a fire that bring light and comfort.
+SYSTEM_PROMPT = """You are Lantern, a helpful AI assistant for a Discord community server.
 
 Your purpose is to help community members with their questions, research topics, and assist with various tasks. You have access to web search and browsing tools that let you find up-to-date information.
 
-Be friendly, clear, and concise. When you use a tool, summarize what you found. If you cannot find reliable information, be honest about it. Keep your responses well-structured and easy to read in a chat environment."""
+Be concise. Answer directly with minimal fluff. Use tools when needed, summarize results briefly, and keep responses short."""
 
 MAX_HISTORY = 20
-THREAD_ARCHIVE_MINUTES = 60
-THREAD_NAME_MAX = 80
 MAX_RESPONSE_LENGTH = 3800
 MAX_FOLLOWUP_LENGTH = 1900
 MESSAGE_DELAY = 1
@@ -195,22 +193,22 @@ class MCPManager:
     async def connect_all(self):
         config_path = MCP_CONFIG_PATH
         if not os.path.exists(config_path):
-            print(f"Ember: {config_path} not found \u2014 running without web tools")
+            print(f"[Lantern AI] {config_path} not found \u2014 running without web tools")
             return
         try:
             with open(config_path) as f:
                 cfg = json.load(f)
         except Exception as e:
-            print(f"Ember: failed to read {config_path}: {e}")
+            print(f"[Lantern AI] failed to read {config_path}: {e}")
             return
         servers_cfg = cfg.get("servers", {})
         if not servers_cfg:
-            print("Ember: no servers in config \u2014 running without web tools")
+            print("[Lantern AI] no servers in config \u2014 running without web tools")
             return
         for name, opts in servers_cfg.items():
             url = opts.get("url")
             if not url:
-                print(f"Ember: skipping server '{name}' \u2014 no url")
+                print(f"[Lantern AI] skipping server '{name}' \u2014 no url")
                 continue
             server = _build_server(name, opts)
             try:
@@ -220,14 +218,14 @@ class MCPManager:
                     prefixed = f"{name}.{t.name}"
                     self._tool_map[prefixed] = (server, t.name)
                 tool_names = [f"{name}.{t.name}" for t in server.tools]
-                print(f"Ember: MCP '{name}' connected \u2014 tools: {tool_names}")
+                print(f"[Lantern AI] MCP '{name}' connected \u2014 tools: {tool_names}")
             except Exception as e:
-                print(f"Ember: MCP '{name}' connection failed: {e}")
+                print(f"[Lantern AI] MCP '{name}' connection failed: {e}")
         total_tools = len(self._tool_map)
         if total_tools:
-            print(f"Ember: {len(self.servers)} MCP server(s) connected \u2014 {total_tools} tool(s) available")
+            print(f"[Lantern AI] {len(self.servers)} MCP server(s) connected \u2014 {total_tools} tool(s) available")
         else:
-            print("Ember: no MCP tools available")
+            print("[Lantern AI] no MCP tools available")
 
     async def disconnect_all(self):
         for server in self.servers:
@@ -265,6 +263,7 @@ class SessionManager:
         self.sessions = {}
         self.owners = {}
         self.user_contexts = {}
+        self.search_enabled = {}
 
     def get(self, session_id: int):
         return self.sessions.get(session_id)
@@ -303,6 +302,7 @@ class SessionManager:
         self.sessions.pop(session_id, None)
         self.owners.pop(session_id, None)
         self.user_contexts.pop(session_id, None)
+        self.search_enabled.pop(session_id, None)
 
     def has(self, session_id: int) -> bool:
         return session_id in self.sessions
@@ -315,6 +315,7 @@ class FollowUpModal(discord.ui.Modal):
         self.user_id = user_id
         self.session_key = session_key
         self.channel_id = channel_id
+        self._search_enabled = False
         self.add_item(discord.ui.InputText(
             label="Your question",
             style=discord.InputTextStyle.long,
@@ -322,12 +323,41 @@ class FollowUpModal(discord.ui.Modal):
             required=True,
         ))
 
+    def to_components(self) -> list[dict]:
+        components = super().to_components()
+        checked = self.cog.sessions.search_enabled.get(self.session_key, False)
+        components.append({
+            "type": 18,
+            "label": "Enable web search",
+            "component": {
+                "type": 23,
+                "custom_id": "search_checkbox",
+                "value": checked,
+            },
+        })
+        return components
+
+    def refresh(self, interaction: discord.Interaction, data: list[dict]):
+        for parent in data:
+            if parent.get("type") == 18:
+                inner = parent.get("component", {})
+                if inner.get("custom_id") == "search_checkbox":
+                    self._search_enabled = inner.get("value", False)
+            else:
+                for comp in parent.get("components", []):
+                    for child in self.children:
+                        if child.custom_id == comp.get("custom_id"):
+                            child.refresh_from_modal(interaction, comp)
+                            break
+
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This follow-up is not for you.", ephemeral=True)
             return
+        self.cog.sessions.search_enabled[self.session_key] = self._search_enabled
         await interaction.response.defer()
         question = self.children[0].value
+        print(f"[Lantern AI] {interaction.user} (ID: {self.user_id}): follow-up \"{question[:200]}\"")
         self.cog.sessions.add_message(self.session_key, {"role": "user", "content": question})
         channel = self.cog.bot.get_channel(self.channel_id)
         async with self.cog._lock:
@@ -350,7 +380,8 @@ class FollowUpView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This follow-up is not for you.", ephemeral=True)
             return
-        await interaction.response.send_modal(FollowUpModal(self.cog, self.user_id, self.session_key, self.channel_id))
+        modal = FollowUpModal(self.cog, self.user_id, self.session_key, self.channel_id)
+        await interaction.response.send_modal(modal)
 
     async def on_timeout(self):
         self.cog.sessions.forget(self.session_key)
@@ -466,6 +497,23 @@ class Chat(commands.Cog):
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get current weather for a location. No API key needed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "City name (e.g., 'London', 'New York', 'Tokyo')",
+                        }
+                    },
+                    "required": ["location"],
+                },
+            },
+        },
     ]
 
     _BUILTIN_NAMES = {t["function"]["name"] for t in BUILTIN_TOOLS}
@@ -503,6 +551,8 @@ class Chat(commands.Cog):
             return await self._handle_set_color(args, destination, requester_id)
         elif name == "clear_user_color":
             return await self._handle_clear_color(args, destination, requester_id)
+        elif name == "get_weather":
+            return await self._handle_weather(args)
         return f"Unknown built-in tool: {name}"
 
     async def _handle_set_color(self, args: dict, destination, requester_id: int | None = None) -> str:
@@ -541,7 +591,7 @@ class Chat(commands.Cog):
                     name=color_input,
                     color=discord.Color(color_int),
                     permissions=discord.Permissions.none(),
-                    reason=f"Color set via Ember AI for {member} ({member.id})",
+                    reason=f"Color set via Lantern AI for {member} ({member.id})",
                 )
             except discord.HTTPException as e:
                 return f"Failed to create color role: {e}"
@@ -549,9 +599,9 @@ class Chat(commands.Cog):
         for role in existing:
             try:
                 if len(role.members) <= 1:
-                    await role.delete(reason="Replacing color via Ember AI")
+                    await role.delete(reason="Replacing color via Lantern AI")
                 else:
-                    await member.remove_roles(role, reason="Replacing color via Ember AI")
+                    await member.remove_roles(role, reason="Replacing color via Lantern AI")
             except discord.HTTPException:
                 pass
         try:
@@ -579,9 +629,9 @@ class Chat(commands.Cog):
             if self.COLOR_REGEX.match(role.name):
                 try:
                     if len(role.members) <= 1:
-                        await role.delete(reason="Clearing color via Ember AI")
+                        await role.delete(reason="Clearing color via Lantern AI")
                     else:
-                        await member.remove_roles(role, reason="Clearing color via Ember AI")
+                        await member.remove_roles(role, reason="Clearing color via Lantern AI")
                     removed = True
                 except discord.HTTPException:
                     pass
@@ -596,36 +646,106 @@ class Chat(commands.Cog):
             return mcp_tools + builtin
         return builtin if builtin else None
 
-    def _build_user_context(self, guild, member_id: int) -> str | None:
-        if not guild:
-            return None
-        member = guild.get_member(member_id)
-        if not member:
-            return None
-        parts = [f"Discord ID: {member_id}", f"Username: {member.name}"]
-        if member.nick:
-            parts.append(f"Nickname: {member.nick}")
-        parts.append(f"Display name: {member.display_name}")
-        parts.append(f"Server: {guild.name}")
-        if member.guild_permissions.administrator:
-            parts.append("Role: Admin")
-        elif member.guild_permissions.manage_guild:
-            parts.append("Role: Moderator")
-        top_roles = [r.name for r in member.roles[-3:] if r.name != "@everyone"]
-        if top_roles:
-            parts.append(f"Roles: {', '.join(top_roles)}")
-        created_ago = (datetime.datetime.now(datetime.timezone.utc) - member.created_at).days
-        parts.append(f"Account age: {created_ago} days")
-        return " | ".join(parts)
+    WMO_CODES = {
+        0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+        45: "Foggy", 48: "Depositing rime fog",
+        51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
+        56: "Light freezing drizzle", 57: "Dense freezing drizzle",
+        61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
+        66: "Light freezing rain", 67: "Heavy freezing rain",
+        71: "Slight snow", 73: "Moderate snow", 75: "Heavy snow",
+        77: "Snow grains",
+        80: "Slight rain showers", 81: "Moderate rain showers", 82: "Violent rain showers",
+        85: "Slight snow showers", 86: "Heavy snow showers",
+        95: "Thunderstorm", 96: "Thunderstorm with slight hail", 99: "Thunderstorm with heavy hail",
+    }
 
-    async def _send_long_message(self, destination, content: str):
-        if not content:
-            return
-        chunks = [content[i:i + MAX_RESPONSE_LENGTH] for i in range(0, len(content), MAX_RESPONSE_LENGTH)]
-        for i, chunk in enumerate(chunks):
-            await destination.send(chunk)
-            if i < len(chunks) - 1:
-                await asyncio.sleep(MESSAGE_DELAY)
+    async def _handle_weather(self, args: dict) -> str:
+        location = args.get("location", "").strip()
+        if not location:
+            return "Please specify a location."
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                geo = await client.get(
+                    "https://geocoding-api.open-meteo.com/v1/search",
+                    params={"name": location, "count": 1, "language": "en", "format": "json"},
+                )
+                geo.raise_for_status()
+                geo_data = geo.json()
+                if not geo_data.get("results"):
+                    return f"Could not find a location named '{location}'."
+                result = geo_data["results"][0]
+                lat, lon = result["latitude"], result["longitude"]
+                name = f"{result.get('name', location)}, {result.get('country', '')}"
+
+                weather = await client.get(
+                    "https://api.open-meteo.com/v1/forecast",
+                    params={
+                        "latitude": lat, "longitude": lon,
+                        "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
+                        "timezone": "auto",
+                    },
+                )
+                weather.raise_for_status()
+                w = weather.json()["current"]
+
+                code = self.WMO_CODES.get(w.get("weather_code"), "Unknown")
+                temp = w.get("temperature_2m", "?")
+                feels = w.get("apparent_temperature", "?")
+                humidity = w.get("relative_humidity_2m", "?")
+                wind = w.get("wind_speed_10m", "?")
+
+                allergens = await client.get(
+                    "https://air-quality-api.open-meteo.com/v1/air-quality",
+                    params={
+                        "latitude": lat, "longitude": lon,
+                        "current": "alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,olive_pollen,ragweed_pollen",
+                    },
+                )
+                parts = [
+                    f"Weather in {name}: {code}, {temp}\u00b0C (feels like {feels}\u00b0C). "
+                    f"Humidity: {humidity}%. Wind: {wind} km/h."
+                ]
+                if allergens.status_code == 200:
+                    a = allergens.json().get("current", {})
+                    pollen = [
+                        f"{k.replace('_pollen', '').title()} {v}"
+                        for k, v in a.items() if isinstance(v, (int, float)) and v is not None
+                    ]
+                    if pollen:
+                        parts.append("Allergens: " + ", ".join(pollen) + " grains/m\u00b3")
+                return "\n".join(parts)
+        except httpx.HTTPError as e:
+            return f"Weather API error: {e}"
+
+    def _build_user_context(self, guild, member_id: int, user=None) -> str | None:
+        if guild:
+            member = guild.get_member(member_id)
+            if member:
+                parts = [f"Discord ID: {member_id}", f"Username: {member.name}"]
+                if member.nick:
+                    parts.append(f"Nickname: {member.nick}")
+                parts.append(f"Display name: {member.display_name}")
+                parts.append(f"Server: {guild.name}")
+                if member.guild_permissions.administrator:
+                    parts.append("Role: Admin")
+                elif member.guild_permissions.manage_guild:
+                    parts.append("Role: Moderator")
+                top_roles = [r.name for r in member.roles[-3:] if r.name != "@everyone"]
+                if top_roles:
+                    parts.append(f"Roles: {', '.join(top_roles)}")
+                created_ago = (datetime.datetime.now(datetime.timezone.utc) - member.created_at).days
+                parts.append(f"Account age: {created_ago} days")
+                return " | ".join(parts)
+
+        if user:
+            parts = [f"Discord ID: {member_id}", f"Username: {user.name}", f"Display name: {user.display_name}"]
+            created_ago = (datetime.datetime.now(datetime.timezone.utc) - user.created_at).days
+            parts.append(f"Account age: {created_ago} days")
+            return " | ".join(parts)
+
+        return None
 
     async def _send_long_message_follow(self, interaction, content: str, view=None):
         if not content:
@@ -639,79 +759,22 @@ class Chat(commands.Cog):
             if i < len(chunks) - 1:
                 await asyncio.sleep(MESSAGE_DELAY)
 
-    ai = discord.SlashCommandGroup("ai", "Ember AI commands", guild_ids=GUILD_IDS)
-    chat = ai.create_subgroup("chat", "Chat conversation commands")
+    ai = discord.SlashCommandGroup("ai", "Lantern AI commands", guild_ids=GUILD_IDS)
 
-    @chat.command(name="ask", description="Start a conversation with Ember AI")
-    async def ask(
-        self,
-        ctx: discord.ApplicationContext,
-        message: str = discord.Option(str, description="Your question or message for Ember"),
-        public: bool = discord.Option(bool, description="Create a public thread", default=False),
-        members: str = discord.Option(str, description="Additional people to add (IDs, space-separated)", default=None),
-    ):
-        await ctx.defer(ephemeral=True)
-
-        print(f"[Ember] {ctx.author} (ID: {ctx.author.id}): /ai chat ask \"{message[:200]}\"")
-
-        try:
-            thread_name = message.strip()[:THREAD_NAME_MAX]
-            if len(message.strip()) > THREAD_NAME_MAX:
-                thread_name += "\u2026"
-            thread_type = discord.ChannelType.public_thread if public else discord.ChannelType.private_thread
-            thread = await ctx.channel.create_thread(
-                name=f"Ask Ember \u2014 {thread_name}",
-                type=thread_type,
-                auto_archive_duration=THREAD_ARCHIVE_MINUTES,
-            )
-            await thread.add_user(ctx.author)
-            if members:
-                for raw in members.strip().split():
-                    raw = raw.strip("<@!>")
-                    try:
-                        uid = int(raw)
-                        member = ctx.guild.get_member(uid)
-                        if member:
-                            await thread.add_user(member)
-                    except ValueError:
-                        pass
-        except Exception as e:
-            await ctx.send_followup(f"Failed to create thread: {e}")
-            return
-
-        self.sessions.create(thread.id, ctx.author.id, user_context=self._build_user_context(ctx.guild, ctx.author.id))
-        self.sessions.add_message(thread.id, {"role": "user", "content": message})
-
-        async with self._lock:
-            response = await self._get_ai_response(thread.id, destination=thread, author_id=ctx.author.id)
-
-        await thread.send(f"{ctx.author.mention} asked:\n> {message[:500]}")
-        await self._send_long_message(thread, response)
-
-        embed = discord.Embed(
-            title="Ember Chat",
-            description=f"Conversation started in {thread.mention}",
-            color=discord.Color.orange(),
-        )
-        await ctx.send_followup(embed=embed)
-
-    @chat.command(name="forget", description="Clear conversation memory for this thread")
-    async def forget(self, ctx: discord.ApplicationContext):
-        self.sessions.forget(ctx.channel_id)
-        await ctx.send_response("Conversation memory cleared.", ephemeral=True)
-
-    @ai.command(name="answer", description="Get a quick answer from Ember AI")
+    @ai.command(name="answer", description="Get a quick answer from Lantern AI")
     async def answer(
         self,
         ctx: discord.ApplicationContext,
-        message: str = discord.Option(str, description="Your question for Ember"),
+        message: str = discord.Option(str, description="Your question for Lantern AI"),
+        search: bool = discord.Option(bool, description="Allow web search tools", default=False),
     ):
         await ctx.defer()
 
-        print(f"[Ember] {ctx.author} (ID: {ctx.author.id}): /ai answer \"{message[:200]}\"")
+        print(f"[Lantern AI] {ctx.author} (ID: {ctx.author.id}): /ai answer \"{message[:200]}\" search={search}")
 
         session_key = self._answer_session_key(ctx.author.id, ctx.channel_id)
-        self.sessions.create(session_key, ctx.author.id, user_context=self._build_user_context(ctx.guild, ctx.author.id))
+        self.sessions.create(session_key, ctx.author.id, user_context=self._build_user_context(ctx.guild, ctx.author.id, ctx.author))
+        self.sessions.search_enabled[session_key] = search
         self.sessions.add_message(session_key, {"role": "user", "content": message})
 
         async with self._lock:
@@ -719,30 +782,6 @@ class Chat(commands.Cog):
 
         view = FollowUpView(self, ctx.author.id, session_key, ctx.channel_id)
         await self._send_long_message_follow(ctx, response, view=view)
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.bot:
-            return
-        if not self.sessions.has(message.channel.id):
-            return
-        if message.type != discord.MessageType.default:
-            return
-
-        print(f"[Ember] {message.author} (ID: {message.author.id}): \"{message.content[:200]}\"")
-
-        async with message.channel.typing():
-            self.sessions.add_message(
-                message.channel.id,
-                {"role": "user", "content": message.content},
-            )
-            async with self._lock:
-                response = await self._get_ai_response(message.channel.id, destination=message.channel, author_id=message.author.id)
-            await self._send_long_message(message.channel, response)
-
-    @commands.Cog.listener()
-    async def on_thread_delete(self, thread: discord.Thread):
-        self.sessions.forget(thread.id)
 
     async def _ai_complete(self, messages: list, tools) -> openai.types.chat.ChatCompletion:
         return await asyncio.to_thread(
@@ -758,6 +797,8 @@ class Chat(commands.Cog):
             return "Session not found. Use `/ai chat ask` to start a new conversation."
 
         tools = self._get_all_tools()
+        if not self.sessions.search_enabled.get(session_id):
+            tools = [t for t in (tools or []) if t["function"]["name"] in self._BUILTIN_NAMES] or None
         seen_calls = set()
         tool_counts = {}
 
@@ -800,7 +841,10 @@ class Chat(commands.Cog):
             except asyncio.TimeoutError:
                 return "AI service timed out. Please try again."
             except Exception as e:
-                return f"AI service error: {e}"
+                msg = str(e)
+                if "does not support image" in msg.lower():
+                    return "I can only process text messages. I cannot read images or files."
+                return f"AI service error: {msg[:200]}"
 
             choice = response.choices[0]
 
@@ -835,17 +879,8 @@ class Chat(commands.Cog):
                         bare_name = tc.function.name.split(".")[-1]
                         tool_counts[bare_name] = tool_counts.get(bare_name, 0) + 1
 
-                        if destination:
-                            args_str = json.dumps(args, indent=2)[:1000]
-                            embed = discord.Embed(
-                                title=f"\U0001f6e0 {tc.function.name}",
-                                description=f"```json\n{args_str}\n```",
-                                color=discord.Color.blue(),
-                            )
-                            await destination.send(embed=embed)
-
                         args_str_display = json.dumps(args)[:500]
-                        print(f"[Ember] Tool call: {tc.function.name}({args_str_display})")
+                        print(f"[Lantern AI] Tool call: {tc.function.name}({args_str_display})")
 
                         if tc.function.name in self._BUILTIN_NAMES:
                             result = await self._call_builtin_tool(tc.function.name, args, destination, requester_id=author_id)
