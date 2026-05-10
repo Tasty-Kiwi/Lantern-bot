@@ -27,9 +27,6 @@ Your purpose is to help community members with their questions, research topics,
 Be concise. Answer directly with minimal fluff. Use tools when needed, summarize results briefly, and keep responses short."""
 
 MAX_HISTORY = 20
-MAX_RESPONSE_LENGTH = 3800
-MAX_FOLLOWUP_LENGTH = 1900
-MESSAGE_DELAY = 1
 
 
 class StreamableHTTPServer:
@@ -360,11 +357,11 @@ class FollowUpModal(discord.ui.Modal):
         print(f"[Lantern AI] {interaction.user} (ID: {self.user_id}): follow-up \"{question[:200]}\"")
         self.cog.sessions.add_message(self.session_key, {"role": "user", "content": question})
         channel = self.cog.bot.get_channel(self.channel_id)
-        async with self.cog._lock:
-            response = await self.cog._get_ai_response(self.session_key, destination=channel, author_id=self.user_id)
-        formatted = f"<@{self.user_id}> asked:\n> {question[:500]}\n\n{response}"
+        prefix = f"<@{self.user_id}> asked:\n> {question[:500]}\n\n"
+        msg = await interaction.followup.send(content=f"{prefix}-# Thinking...")
         view = FollowUpView(self.cog, self.user_id, self.session_key, self.channel_id)
-        await self.cog._send_long_message_follow(interaction, formatted, view=view)
+        async with self.cog._lock:
+            await self.cog._stream_response(self.session_key, msg, destination=channel, author_id=self.user_id, prefix=prefix, view=view)
 
 
 class FollowUpView(discord.ui.View):
@@ -397,6 +394,7 @@ class Chat(commands.Cog):
             base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
         )
         self.model = os.getenv("NVIDIA_MODEL", "deepseek-v4-flash")
+        self.vision_model = os.getenv("NVIDIA_VISION_MODEL", "meta/llama-3.2-11b-vision-instruct")
         self._lock = asyncio.Lock()
         bot.loop.create_task(self._init_mcp())
 
@@ -747,60 +745,18 @@ class Chat(commands.Cog):
 
         return None
 
-    async def _send_long_message_follow(self, interaction, content: str, view=None):
-        if not content:
-            return
-        chunks = [content[i:i + MAX_FOLLOWUP_LENGTH] for i in range(0, len(content), MAX_FOLLOWUP_LENGTH)]
-        for i, chunk in enumerate(chunks):
-            kwargs = {}
-            if i == len(chunks) - 1 and view:
-                kwargs["view"] = view
-            await interaction.followup.send(chunk, **kwargs)
-            if i < len(chunks) - 1:
-                await asyncio.sleep(MESSAGE_DELAY)
-
-    ai = discord.SlashCommandGroup("ai", "Lantern AI commands", guild_ids=GUILD_IDS)
-
-    @ai.command(name="answer", description="Get a quick answer from Lantern AI")
-    async def answer(
-        self,
-        ctx: discord.ApplicationContext,
-        message: str = discord.Option(str, description="Your question for Lantern AI"),
-        search: bool = discord.Option(bool, description="Allow web search tools", default=False),
-    ):
-        await ctx.defer()
-
-        print(f"[Lantern AI] {ctx.author} (ID: {ctx.author.id}): /ai answer \"{message[:200]}\" search={search}")
-
-        session_key = self._answer_session_key(ctx.author.id, ctx.channel_id)
-        self.sessions.create(session_key, ctx.author.id, user_context=self._build_user_context(ctx.guild, ctx.author.id, ctx.author))
-        self.sessions.search_enabled[session_key] = search
-        self.sessions.add_message(session_key, {"role": "user", "content": message})
-
-        async with self._lock:
-            response = await self._get_ai_response(session_key, destination=ctx.channel, author_id=ctx.author.id)
-
-        view = FollowUpView(self, ctx.author.id, session_key, ctx.channel_id)
-        await self._send_long_message_follow(ctx, response, view=view)
-
-    async def _ai_complete(self, messages: list, tools) -> openai.types.chat.ChatCompletion:
-        return await asyncio.to_thread(
-            self.ai.chat.completions.create,
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto" if tools else None,
-        )
-
-    async def _get_ai_response(self, session_id: int, destination=None, author_id: int | None = None) -> str:
+    async def _stream_response(self, session_id: int, msg: discord.Message, destination=None, author_id: int | None = None, prefix="", view=None):
         if not self.sessions.get(session_id):
-            return "Session not found. Use `/ai chat ask` to start a new conversation."
+            await msg.edit(content=f"{prefix}Session not found.")
+            return
 
         tools = self._get_all_tools()
         if not self.sessions.search_enabled.get(session_id):
             tools = [t for t in (tools or []) if t["function"]["name"] in self._BUILTIN_NAMES] or None
+
         seen_calls = set()
-        tool_counts = {}
+        inline_notes = []
+        final_text = None
 
         for attempt in range(5):
             messages = self.sessions.get(session_id)
@@ -814,9 +770,17 @@ class Chat(commands.Cog):
                 guild = getattr(destination, "guild", None)
                 if guild and author_id:
                     mentioned = set()
-                    for msg in messages:
-                        if msg.get("role") == "user":
-                            for uid in re.findall(r"<@!?(\d+)>", msg.get("content", "")):
+                    for m in messages:
+                        if m.get("role") == "user":
+                            txt = ""
+                            c = m.get("content", "")
+                            if isinstance(c, str):
+                                txt = c
+                            elif isinstance(c, list):
+                                for part in c:
+                                    if isinstance(part, dict) and part.get("type") == "text":
+                                        txt = part.get("text", "")
+                            for uid in re.findall(r"<@!?(\d+)>", txt):
                                 mentioned.add(int(uid))
                     mentioned.discard(author_id)
                     for uid in mentioned:
@@ -828,10 +792,7 @@ class Chat(commands.Cog):
                             top_roles = [r.name for r in m.roles[-3:] if r.name != "@everyone"]
                             if top_roles:
                                 info.append(f"Roles: {', '.join(top_roles)}")
-                            ctx_parts.append({
-                                "role": "system",
-                                "content": " | ".join(info),
-                            })
+                            ctx_parts.append({"role": "system", "content": " | ".join(info)})
             ai_messages = messages + ctx_parts
 
             try:
@@ -839,33 +800,20 @@ class Chat(commands.Cog):
                     self._ai_complete(ai_messages, tools), timeout=120
                 )
             except asyncio.TimeoutError:
-                return "AI service timed out. Please try again."
+                await msg.edit(content=f"{prefix}AI service timed out. Please try again.")
+                return
             except Exception as e:
-                msg = str(e)
-                if "does not support image" in msg.lower():
-                    return "I can only process text messages. I cannot read images or files."
-                return f"AI service error: {msg[:200]}"
+                err = str(e)
+                if "does not support image" in err.lower():
+                    await msg.edit(content=f"{prefix}I cannot process this file type.")
+                else:
+                    await msg.edit(content=f"{prefix}AI service error: {err[:200]}")
+                return
 
             choice = response.choices[0]
 
             if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                msg = choice.message
-                assistant_msg = {"role": "assistant", "content": msg.content or ""}
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    assistant_msg["tool_calls"] = [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in msg.tool_calls
-                    ]
-                self.sessions.add_message(session_id, assistant_msg)
-
-                for tc in msg.tool_calls:
+                for tc in choice.message.tool_calls:
                     try:
                         args = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
@@ -873,14 +821,15 @@ class Chat(commands.Cog):
 
                     sig = (tc.function.name, json.dumps(args, sort_keys=True))
                     if sig in seen_calls:
-                        result = "This tool was already called with the same arguments. Proceed with the information you already have."
+                        result = "Tool was already called with the same arguments."
                     else:
                         seen_calls.add(sig)
                         bare_name = tc.function.name.split(".")[-1]
-                        tool_counts[bare_name] = tool_counts.get(bare_name, 0) + 1
+                        note = f"-# Used: {bare_name}"
+                        if note not in inline_notes:
+                            inline_notes.append(note)
 
-                        args_str_display = json.dumps(args)[:500]
-                        print(f"[Lantern AI] Tool call: {tc.function.name}({args_str_display})")
+                        print(f"[Lantern AI] Tool call: {tc.function.name}({json.dumps(args)[:500]})")
 
                         if tc.function.name in self._BUILTIN_NAMES:
                             result = await self._call_builtin_tool(tc.function.name, args, destination, requester_id=author_id)
@@ -891,17 +840,167 @@ class Chat(commands.Cog):
                         session_id,
                         {"role": "tool", "tool_call_id": tc.id, "content": result},
                     )
+
+                notes_text = "\n".join(inline_notes)
+                await msg.edit(content=f"{prefix}{notes_text}\n-# Thinking...")
+
+                assistant_msg = {"role": "assistant", "content": ""}
+                assistant_msg["tool_calls"] = [
+                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in choice.message.tool_calls
+                ]
+                self.sessions.add_message(session_id, assistant_msg)
                 continue
 
-            content = choice.message.content or ""
-            content = "\n".join(l for l in content.split("\n") if "Used tools:" not in l).rstrip()
-            if tool_counts:
-                summary = ", ".join(f"{n} {c}x" for n, c in sorted(tool_counts.items()))
-                content += f"\n-# Used tools: {summary}"
-            self.sessions.add_message(session_id, {"role": "assistant", "content": content})
-            return content
+            final_text = choice.message.content or ""
+            break
 
-        return "I had trouble processing your request. Please try again."
+        if final_text is None:
+            await msg.edit(content=f"{prefix}I had trouble processing your request. Please try again.")
+            return
+
+        final_text = "\n".join(l for l in final_text.split("\n") if "Used tools:" not in l).rstrip()
+        self.sessions.add_message(session_id, {"role": "assistant", "content": final_text})
+
+        notes_text = "\n".join(inline_notes)
+        separator = "\n\n" if inline_notes and final_text else ""
+        full = f"{prefix}{notes_text}{separator}{final_text}"
+
+        total_len = len(full)
+        duration = max(2, min(10, total_len / 80))
+
+        import time as time_mod
+        start = time_mod.monotonic()
+        revealed = 0
+
+        while revealed < total_len:
+            elapsed = time_mod.monotonic() - start
+            target = min(total_len, int((elapsed / duration) * total_len))
+            if target > revealed:
+                revealed = target
+                try:
+                    await msg.edit(content=full[:revealed])
+                except discord.HTTPException:
+                    break
+            await asyncio.sleep(0.25)
+
+        kwargs = {"content": full}
+        if view:
+            kwargs["view"] = view
+        try:
+            await msg.edit(**kwargs)
+        except discord.HTTPException:
+            pass
+
+    ai = discord.SlashCommandGroup("ai", "Lantern AI commands", guild_ids=GUILD_IDS)
+
+    @ai.command(name="answer", description="Get a quick answer from Lantern AI")
+    async def answer(
+        self,
+        ctx: discord.ApplicationContext,
+        message: str = discord.Option(str, description="Your question for Lantern AI"),
+        search: bool = discord.Option(bool, description="Allow web search tools", default=False),
+        upload: discord.Attachment = discord.Option(discord.SlashCommandOptionType.attachment, description="Image, video, audio, PDF, or text file", required=False, default=None),
+    ):
+        await ctx.defer()
+
+        print(f"[Lantern AI] {ctx.author} (ID: {ctx.author.id}): /ai answer \"{message[:200]}\" search={search} upload={'yes' if upload else 'no'}")
+
+        session_key = self._answer_session_key(ctx.author.id, ctx.channel_id)
+        self.sessions.create(session_key, ctx.author.id, user_context=self._build_user_context(ctx.guild, ctx.author.id, ctx.author))
+        self.sessions.search_enabled[session_key] = search
+
+        if upload:
+            ct = upload.content_type or ""
+            ext = (upload.filename or "").rsplit(".", 1)[-1].lower() if upload.filename else ""
+            import base64
+            raw = await upload.read()
+
+            IMAGE_EXTS = {"png", "jpg", "jpeg", "webp"}
+            VIDEO_EXTS = {"mp4", "mov", "webm"}
+            AUDIO_EXTS = {"wav", "mp3"}
+
+            if ct.startswith("text/") or ct in (
+                "application/json", "application/xml", "application/yaml",
+                "application/python", "application/javascript",
+            ):
+                text = raw.decode("utf-8", errors="replace")
+                text = f"{message}\n\n```\n{text[:50000]}```" if message else f"```\n{text[:50000]}```"
+                self.sessions.add_message(session_key, {"role": "user", "content": text})
+
+            elif ext in IMAGE_EXTS and ct.startswith("image/"):
+                b64 = base64.b64encode(raw).decode()
+                self.sessions.add_message(session_key, {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": message or "What's in this image?"},
+                        {"type": "image_url", "image_url": {"url": f"data:{ct};base64,{b64}"}},
+                    ],
+                })
+
+            elif ext in VIDEO_EXTS and ct.startswith("video/"):
+                b64 = base64.b64encode(raw).decode()
+                self.sessions.add_message(session_key, {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": message or "What's in this video?"},
+                        {"type": "video_url", "video_url": {"url": f"data:{ct};base64,{b64}"}},
+                    ],
+                })
+
+            elif ext in AUDIO_EXTS and ct.startswith("audio/"):
+                b64 = base64.b64encode(raw).decode()
+                fmt = ext or ct.split("/")[-1]
+                self.sessions.add_message(session_key, {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": message or "What's in this audio?"},
+                        {"type": "input_audio", "input_audio": {"data": b64, "format": fmt}},
+                    ],
+                })
+
+            elif ext == "pdf" or ct == "application/pdf":
+                import fitz
+                doc = fitz.open(stream=raw, filetype="pdf")
+                parts = [{"type": "text", "text": message or "What's in this PDF?"}]
+                for i, page in enumerate(doc):
+                    if i >= 10:
+                        parts.append({"type": "text", "text": f"... and {len(doc) - 10} more pages"})
+                        break
+                    pix = page.get_pixmap(dpi=150)
+                    img_bytes = pix.tobytes("png")
+                    b64 = base64.b64encode(img_bytes).decode()
+                    parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+                doc.close()
+                self.sessions.add_message(session_key, {"role": "user", "content": parts})
+
+            else:
+                await ctx.followup.send(
+                    f"Unsupported file type `.{ext}`. Supported formats:\n"
+                    f"- Images: png, jpg, jpeg, webp\n"
+                    f"- Video: mp4, mov, webm\n"
+                    f"- Audio: wav, mp3\n"
+                    f"- PDF\n"
+                    f"- Text/code files"
+                )
+                return
+        else:
+            self.sessions.add_message(session_key, {"role": "user", "content": message or "..."})
+
+        async with self._lock:
+            msg = await ctx.followup.send(content="-# Thinking...")
+            await self._stream_response(session_key, msg, destination=ctx.channel, author_id=ctx.author.id, view=FollowUpView(self, ctx.author.id, session_key, ctx.channel_id))
+
+    async def _ai_complete(self, messages: list, tools) -> openai.types.chat.ChatCompletion:
+        is_multimodal = any(isinstance(m.get("content"), list) for m in messages)
+        model = self.vision_model if is_multimodal else self.model
+        return await asyncio.to_thread(
+            self.ai.chat.completions.create,
+            model=model,
+            messages=messages,
+            tools=tools if not is_multimodal else None,
+            tool_choice=None if is_multimodal else ("auto" if tools else None),
+        )
 
 
 def setup(bot):
