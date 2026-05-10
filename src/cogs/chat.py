@@ -483,12 +483,13 @@ class SessionManager:
 
 
 class FollowUpModal(discord.ui.Modal):
-    def __init__(self, cog, user_id: int, session_key: int, channel_id: int):
+    def __init__(self, cog, user_id: int, session_key: int, channel_id: int, username: str = ""):
         super().__init__(title="Ask a follow-up")
         self.cog = cog
         self.user_id = user_id
         self.session_key = session_key
         self.channel_id = channel_id
+        self.username = username
         self._search_enabled = False
         self.add_item(discord.ui.InputText(
             label="Your question",
@@ -534,11 +535,11 @@ class FollowUpModal(discord.ui.Modal):
         print(f"[Lantern AI] {interaction.user} (ID: {self.user_id}): follow-up \"{question[:200]}\"")
         await self.cog.sessions.add_message(self.session_key, {"role": "user", "content": question})
         channel = self.cog.bot.get_channel(self.channel_id)
-        prefix = f"<@{self.user_id}> asked:\n> {question[:500]}\n\n"
-        msg = await interaction.followup.send(content=f"{prefix}-# Thinking...")
+        init_embed = self.cog._build_answer_embed("-# Thinking...", self.username, question)
+        msg = await interaction.followup.send(embed=init_embed)
         view = FollowUpView(self.cog, self.user_id, self.session_key, self.channel_id)
         async with self.cog._lock:
-            await self.cog._stream_response(self.session_key, msg, destination=channel, author_id=self.user_id, prefix=prefix, view=view)
+            await self.cog._stream_response(self.session_key, msg, destination=channel, author_id=self.user_id, username=self.username, question=question, view=view)
 
 
 class FollowUpView(discord.ui.View):
@@ -554,7 +555,7 @@ class FollowUpView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This follow-up is not for you.", ephemeral=True)
             return
-        modal = FollowUpModal(self.cog, self.user_id, self.session_key, self.channel_id)
+        modal = FollowUpModal(self.cog, self.user_id, self.session_key, self.channel_id, username=str(interaction.user))
         await interaction.response.send_modal(modal)
 
     async def on_timeout(self):
@@ -980,9 +981,17 @@ class Chat(commands.Cog):
 
         return None
 
-    async def _stream_response(self, session_id: int, msg: discord.Message, destination=None, author_id: int | None = None, prefix="", view=None):
+    def _build_answer_embed(self, description: str, username: str = "", question: str = "", notes: str = ""):
+        e = discord.Embed(description=description, color=discord.Color.orange())
+        if question:
+            e.title = question[:256]
+        if username:
+            e.set_author(name=f"Lantern AI - Initiated by: {username}")
+        return e
+
+    async def _stream_response(self, session_id: int, msg: discord.Message, destination=None, author_id: int | None = None, username="", question="", view=None):
         if not self.sessions.get(session_id):
-            await msg.edit(content=f"{prefix}Session not found.")
+            await msg.edit(content="Session not found.")
             return
 
         tools = self._get_all_tools()
@@ -992,6 +1001,9 @@ class Chat(commands.Cog):
         seen_calls = set()
         inline_notes = []
         final_text = None
+
+        def embed_with(text):
+            return self._build_answer_embed(text, username, question)
 
         for attempt in range(5):
             messages = self.sessions.get(session_id)
@@ -1035,14 +1047,14 @@ class Chat(commands.Cog):
                     self._ai_complete(ai_messages, tools), timeout=120
                 )
             except asyncio.TimeoutError:
-                await msg.edit(content=f"{prefix}AI service timed out. Please try again.")
+                await msg.edit(embeds=[embed_with("AI service timed out. Please try again.")])
                 return
             except Exception as e:
                 err = str(e)
                 if "does not support image" in err.lower():
-                    await msg.edit(content=f"{prefix}I cannot process this file type.")
+                    await msg.edit(embeds=[embed_with("I cannot process this file type.")])
                 else:
-                    await msg.edit(content=f"{prefix}AI service error: {err[:200]}")
+                    await msg.edit(embeds=[embed_with(f"AI service error: {err[:200]}")])
                 return
 
             choice = response.choices[0]
@@ -1077,7 +1089,7 @@ class Chat(commands.Cog):
                     )
 
                 notes_text = "\n".join(inline_notes)
-                await msg.edit(content=f"{prefix}{notes_text}\n-# Thinking...")
+                await msg.edit(embeds=[embed_with(f"{notes_text}\n-# Thinking...")])
 
                 assistant_msg = {"role": "assistant", "content": ""}
                 assistant_msg["tool_calls"] = [
@@ -1091,7 +1103,7 @@ class Chat(commands.Cog):
             break
 
         if final_text is None:
-            await msg.edit(content=f"{prefix}I had trouble processing your request. Please try again.")
+            await msg.edit(embeds=[embed_with("I had trouble processing your request. Please try again.")])
             return
 
         final_text = "\n".join(l for l in final_text.split("\n") if "Used tools:" not in l).rstrip()
@@ -1100,7 +1112,7 @@ class Chat(commands.Cog):
 
         notes_text = "\n".join(inline_notes)
         separator = "\n\n" if inline_notes and final_text else ""
-        full = f"{prefix}{notes_text}{separator}{final_text}"
+        full = f"{notes_text}{separator}{final_text}"
 
         total_len = len(full)
         duration = max(2, min(10, total_len / 80))
@@ -1115,14 +1127,12 @@ class Chat(commands.Cog):
             if target > revealed:
                 revealed = target
                 try:
-                    await msg.edit(content=full[:revealed])
+                    await msg.edit(embeds=[embed_with(full[:revealed])])
                 except discord.HTTPException:
                     break
             await asyncio.sleep(0.25)
 
-        kwargs = {"content": full}
         if view:
-            kwargs["view"] = view
             prev = self.sessions._last_msgs.get(session_id)
             if prev:
                 try:
@@ -1133,10 +1143,15 @@ class Chat(commands.Cog):
                 except (discord.HTTPException, discord.NotFound):
                     pass
             await self.sessions.set_last_msg(session_id, msg.channel.id, msg.id)
-        try:
-            await msg.edit(**kwargs)
-        except discord.HTTPException:
-            pass
+            try:
+                await msg.edit(embeds=[embed_with(full)], view=view)
+            except discord.HTTPException:
+                pass
+        else:
+            try:
+                await msg.edit(embeds=[embed_with(full)])
+            except discord.HTTPException:
+                pass
 
     ai = discord.SlashCommandGroup("ai", "Lantern AI commands", guild_ids=GUILD_IDS)
 
@@ -1234,8 +1249,9 @@ class Chat(commands.Cog):
             await self.sessions.add_message(session_key, {"role": "user", "content": message or "..."})
 
         async with self._lock:
-            msg = await ctx.followup.send(content="-# Thinking...")
-            await self._stream_response(session_key, msg, destination=ctx.channel, author_id=ctx.author.id, view=FollowUpView(self, ctx.author.id, session_key, ctx.channel_id))
+            init_embed = self._build_answer_embed("-# Thinking...", str(ctx.author), message)
+            msg = await ctx.followup.send(embed=init_embed)
+            await self._stream_response(session_key, msg, destination=ctx.channel, author_id=ctx.author.id, view=FollowUpView(self, ctx.author.id, session_key, ctx.channel_id), username=str(ctx.author), question=message)
 
     async def _ai_complete(self, messages: list, tools) -> openai.types.chat.ChatCompletion:
         is_multimodal = any(isinstance(m.get("content"), list) for m in messages)
