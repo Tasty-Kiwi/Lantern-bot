@@ -999,7 +999,7 @@ class Chat(commands.Cog):
             tools = [t for t in (tools or []) if t["function"]["name"] in self._BUILTIN_NAMES] or None
 
         seen_calls = set()
-        inline_notes = []
+        tool_notes: dict[str, int] = {}
         final_text = None
 
         def embed_with(text):
@@ -1072,9 +1072,7 @@ class Chat(commands.Cog):
                     else:
                         seen_calls.add(sig)
                         bare_name = tc.function.name.split(".")[-1]
-                        note = f"-# Used: {bare_name}"
-                        if note not in inline_notes:
-                            inline_notes.append(note)
+                        tool_notes[bare_name] = tool_notes.get(bare_name, 0) + 1
 
                         print(f"[Lantern AI] Tool call: {tc.function.name}({json.dumps(args)[:500]})")
 
@@ -1088,7 +1086,7 @@ class Chat(commands.Cog):
                         {"role": "tool", "tool_call_id": tc.id, "content": result},
                     )
 
-                notes_text = "\n".join(inline_notes)
+                notes_text = "\n".join(f"-# Used: {n}{f' {c}x' if c > 1 else ''}" for n, c in tool_notes.items())
                 await msg.edit(embeds=[embed_with(f"{notes_text}\n-# Thinking...")])
 
                 assistant_msg = {"role": "assistant", "content": ""}
@@ -1110,8 +1108,8 @@ class Chat(commands.Cog):
         final_text = self._render_markdown_tables(final_text)
         await self.sessions.add_message(session_id, {"role": "assistant", "content": final_text})
 
-        notes_text = "\n".join(inline_notes)
-        separator = "\n\n" if inline_notes and final_text else ""
+        notes_text = "\n".join(f"-# Used: {n}{f' {c}x' if c > 1 else ''}" for n, c in tool_notes.items())
+        separator = "\n\n" if tool_notes and final_text else ""
         full = f"{notes_text}{separator}{final_text}"
 
         total_len = len(full)
