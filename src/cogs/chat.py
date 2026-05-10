@@ -5,6 +5,7 @@ import datetime
 import math
 import random
 import re
+import sqlite3
 import uuid as uuid_mod
 import discord
 from discord.ext import commands
@@ -19,6 +20,8 @@ GUILD_IDS = [int(GUILD_ID)] if GUILD_ID else None
 
 _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MCP_CONFIG_PATH = os.getenv("MCP_CONFIG") or os.path.join(_SRC_DIR, "mcp.json")
+DB_PATH = os.path.join(_SRC_DIR, "sessions.db")
+NO_DB = os.getenv("LANTERN_NO_DB") == "1"
 
 SYSTEM_PROMPT = """You are Lantern, a helpful AI assistant for a Discord community server.
 
@@ -255,17 +258,161 @@ class MCPManager:
         return result if result else None
 
 
+class Database:
+    def __init__(self):
+        self._lock = asyncio.Lock()
+
+    def _run(self, fn, *args, **kwargs):
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            c = conn.cursor()
+            result = fn(c, *args, **kwargs)
+            conn.commit()
+            return result
+        finally:
+            conn.close()
+
+    async def init(self):
+        def _init(c):
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id INTEGER PRIMARY KEY,
+                    owner_id INTEGER NOT NULL,
+                    user_context TEXT,
+                    search_enabled INTEGER NOT NULL DEFAULT 0,
+                    last_activity REAL NOT NULL,
+                    last_channel_id INTEGER,
+                    last_message_id INTEGER
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tool_call_id TEXT,
+                    tool_calls TEXT,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                )
+            """)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)")
+            for col in ("last_channel_id", "last_message_id"):
+                try:
+                    c.execute(f"ALTER TABLE sessions ADD COLUMN {col} INTEGER")
+                except sqlite3.OperationalError:
+                    pass
+        await asyncio.to_thread(self._run, _init)
+
+    async def save_session(self, session_id, owner_id, user_context, search_enabled, last_channel_id=None, last_message_id=None):
+        def _save(c):
+            c.execute(
+                "INSERT OR REPLACE INTO sessions (session_id, owner_id, user_context, search_enabled, last_activity, last_channel_id, last_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, owner_id, user_context, int(search_enabled), datetime.datetime.now(datetime.timezone.utc).timestamp(), last_channel_id, last_message_id),
+            )
+        await asyncio.to_thread(self._run, _save)
+
+    async def touch_session(self, session_id):
+        def _touch(c):
+            c.execute("UPDATE sessions SET last_activity = ? WHERE session_id = ?",
+                      (datetime.datetime.now(datetime.timezone.utc).timestamp(), session_id))
+        await asyncio.to_thread(self._run, _touch)
+
+    async def save_message(self, session_id, role, content, tool_call_id=None, tool_calls=None):
+        def _save(c):
+            content_str = json.dumps(content, default=str) if isinstance(content, list) else str(content)
+            tc_str = json.dumps(tool_calls, default=str) if tool_calls else None
+            c.execute(
+                "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, role, content_str, tool_call_id, tc_str, datetime.datetime.now(datetime.timezone.utc).timestamp()),
+            )
+        await asyncio.to_thread(self._run, _save)
+
+    async def delete_session(self, session_id):
+        def _del(c):
+            c.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            c.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        await asyncio.to_thread(self._run, _del)
+
+    async def cleanup(self, ttl_hours=24):
+        def _clean(c):
+            cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=ttl_hours)).timestamp()
+            c.execute("DELETE FROM messages WHERE session_id IN (SELECT session_id FROM sessions WHERE last_activity < ?)", (cutoff,))
+            c.execute("DELETE FROM sessions WHERE last_activity < ?", (cutoff,))
+        await asyncio.to_thread(self._run, _clean)
+
+    async def load_all(self):
+        def _load(c):
+            sessions = {}
+            owners = {}
+            user_contexts = {}
+            search_enabled = {}
+            last_msgs = {}
+            for row in c.execute("SELECT * FROM sessions"):
+                sid = row["session_id"]
+                owners[sid] = row["owner_id"]
+                if row["user_context"]:
+                    user_contexts[sid] = row["user_context"]
+                search_enabled[sid] = bool(row["search_enabled"])
+                ch = row["last_channel_id"]
+                msg = row["last_message_id"]
+                if ch and msg:
+                    last_msgs[sid] = (ch, msg)
+            for row in c.execute("SELECT * FROM messages ORDER BY id"):
+                sid = row["session_id"]
+                if sid not in sessions:
+                    sessions[sid] = []
+                m = {"role": row["role"]}
+                raw = row["content"]
+                try:
+                    parsed = json.loads(raw)
+                    m["content"] = parsed if isinstance(parsed, list) else raw
+                except (json.JSONDecodeError, TypeError):
+                    m["content"] = raw
+                if row["tool_call_id"]:
+                    m["tool_call_id"] = row["tool_call_id"]
+                if row["tool_calls"]:
+                    try:
+                        m["tool_calls"] = json.loads(row["tool_calls"])
+                    except json.JSONDecodeError:
+                        pass
+                sessions[sid].append(m)
+            return sessions, owners, user_contexts, search_enabled, last_msgs
+        return await asyncio.to_thread(self._run, _load)
+
+
 class SessionManager:
     def __init__(self):
+        self.db = Database() if not NO_DB else None
         self.sessions = {}
         self.owners = {}
         self.user_contexts = {}
         self.search_enabled = {}
+        self._last_msgs = {}
+
+    async def init_db(self):
+        if self.db:
+            await self.db.init()
+
+    async def load_all(self):
+        if not self.db:
+            return
+        await self.db.cleanup(ttl_hours=24)
+        s, o, uc, se, lm = await self.db.load_all()
+        self.sessions.update(s)
+        self.owners.update(o)
+        self.user_contexts.update(uc)
+        self.search_enabled.update(se)
+        self._last_msgs.update(lm)
+        if self.sessions:
+            print(f"[Lantern AI] Restored {len(self.sessions)} session(s) from DB")
 
     def get(self, session_id: int):
         return self.sessions.get(session_id)
 
-    def create(self, session_id: int, owner_id: int, user_context: str | None = None):
+    async def create(self, session_id: int, owner_id: int, user_context: str | None = None):
         now = datetime.datetime.now(datetime.timezone.utc)
         date_msg = {
             "role": "system",
@@ -278,9 +425,12 @@ class SessionManager:
         self.owners[session_id] = owner_id
         if user_context:
             self.user_contexts[session_id] = user_context
+        if self.db:
+            search = self.search_enabled.get(session_id, False)
+            await self.db.save_session(session_id, owner_id, user_context, search)
         return self.sessions[session_id]
 
-    def add_message(self, session_id: int, msg: dict):
+    async def add_message(self, session_id: int, msg: dict):
         if session_id not in self.sessions:
             now = datetime.datetime.now(datetime.timezone.utc)
             date_msg = {
@@ -292,17 +442,44 @@ class SessionManager:
                 date_msg,
             ]
         self.sessions[session_id].append(msg)
+        if self.db:
+            await self.db.save_message(
+                session_id,
+                msg.get("role", ""),
+                msg.get("content", ""),
+                tool_call_id=msg.get("tool_call_id"),
+                tool_calls=msg.get("tool_calls"),
+            )
         if len(self.sessions[session_id]) > MAX_HISTORY + 2:
             self.sessions[session_id] = self.sessions[session_id][:2] + self.sessions[session_id][-MAX_HISTORY:]
 
-    def forget(self, session_id: int):
+    async def forget(self, session_id: int):
         self.sessions.pop(session_id, None)
         self.owners.pop(session_id, None)
         self.user_contexts.pop(session_id, None)
         self.search_enabled.pop(session_id, None)
+        self._last_msgs.pop(session_id, None)
+        if self.db:
+            await self.db.delete_session(session_id)
 
     def has(self, session_id: int) -> bool:
         return session_id in self.sessions
+
+    async def set_search(self, session_id: int, enabled: bool):
+        self.search_enabled[session_id] = enabled
+        if self.db:
+            owner = self.owners.get(session_id, 0)
+            ctx = self.user_contexts.get(session_id)
+            ch, msg = self._last_msgs.get(session_id, (None, None))
+            await self.db.save_session(session_id, owner, ctx, enabled, ch, msg)
+
+    async def set_last_msg(self, session_id: int, channel_id: int, message_id: int):
+        self._last_msgs[session_id] = (channel_id, message_id)
+        if self.db:
+            owner = self.owners.get(session_id, 0)
+            ctx = self.user_contexts.get(session_id)
+            se = self.search_enabled.get(session_id, False)
+            await self.db.save_session(session_id, owner, ctx, se, channel_id, message_id)
 
 
 class FollowUpModal(discord.ui.Modal):
@@ -351,11 +528,11 @@ class FollowUpModal(discord.ui.Modal):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This follow-up is not for you.", ephemeral=True)
             return
-        self.cog.sessions.search_enabled[self.session_key] = self._search_enabled
+        await self.cog.sessions.set_search(self.session_key, self._search_enabled)
         await interaction.response.defer()
         question = self.children[0].value
         print(f"[Lantern AI] {interaction.user} (ID: {self.user_id}): follow-up \"{question[:200]}\"")
-        self.cog.sessions.add_message(self.session_key, {"role": "user", "content": question})
+        await self.cog.sessions.add_message(self.session_key, {"role": "user", "content": question})
         channel = self.cog.bot.get_channel(self.channel_id)
         prefix = f"<@{self.user_id}> asked:\n> {question[:500]}\n\n"
         msg = await interaction.followup.send(content=f"{prefix}-# Thinking...")
@@ -381,7 +558,7 @@ class FollowUpView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
     async def on_timeout(self):
-        self.cog.sessions.forget(self.session_key)
+        await self.cog.sessions.forget(self.session_key)
 
 
 class Chat(commands.Cog):
@@ -400,7 +577,24 @@ class Chat(commands.Cog):
 
     async def _init_mcp(self):
         await self.bot.wait_until_ready()
+        await self.sessions.init_db()
+        await self.sessions.load_all()
+        await self._restore_views()
         await self.mcp.connect_all()
+
+    async def _restore_views(self):
+        for sid, (ch_id, msg_id) in list(self.sessions._last_msgs.items()):
+            owner = self.sessions.owners.get(sid)
+            if not owner:
+                continue
+            try:
+                ch = self.bot.get_channel(ch_id)
+                if ch:
+                    old = await ch.fetch_message(msg_id)
+                    view = FollowUpView(self, owner, sid, ch_id)
+                    await old.edit(view=view)
+            except (discord.HTTPException, discord.NotFound):
+                pass
 
     def cog_unload(self):
         asyncio.ensure_future(self.mcp.disconnect_all())
@@ -644,6 +838,47 @@ class Chat(commands.Cog):
             return mcp_tools + builtin
         return builtin if builtin else None
 
+    def _render_markdown_tables(self, text: str) -> str:
+        lines = text.split("\n")
+        result = []
+        i = 0
+        while i < len(lines):
+            if lines[i].strip().startswith("|") and "|" in lines[i]:
+                table_lines = []
+                while i < len(lines) and lines[i].strip().startswith("|"):
+                    table_lines.append(lines[i].strip())
+                    i += 1
+                if len(table_lines) >= 2 and re.match(r"^\|[-:| ]+\|$", table_lines[1]):
+                    headers = [c.strip() for c in table_lines[0].split("|")[1:-1]]
+                    rows = []
+                    for row_line in table_lines[2:]:
+                        cells = [c.strip() for c in row_line.split("|")[1:-1]]
+                        if cells:
+                            rows.append(cells)
+                    if headers:
+                        col_widths = [len(h) for h in headers]
+                        for row in rows:
+                            for ci, cell in enumerate(row):
+                                if ci < len(col_widths):
+                                    col_widths[ci] = max(col_widths[ci], len(cell))
+                        top = "┌" + "┬".join("─" * w for w in col_widths) + "┐"
+                        head = "│" + "│".join(
+                            h.ljust(col_widths[ci]) for ci, h in enumerate(headers)
+                        ) + "│"
+                        mid = "├" + "┼".join("─" * w for w in col_widths) + "┤"
+                        body = "\n".join(
+                            "│" + "│".join(
+                                c.ljust(col_widths[ci]) for ci, c in enumerate(row)
+                            ) + "│"
+                            for row in rows
+                        )
+                        bot = "└" + "┴".join("─" * w for w in col_widths) + "┘"
+                        result.append(f"```\n{top}\n{head}\n{mid}\n{body}\n{bot}\n```")
+                        continue
+            result.append(lines[i])
+            i += 1
+        return "\n".join(result)
+
     WMO_CODES = {
         0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
         45: "Foggy", 48: "Depositing rime fog",
@@ -836,7 +1071,7 @@ class Chat(commands.Cog):
                         else:
                             result = await self.mcp.call_tool(tc.function.name, args)
 
-                    self.sessions.add_message(
+                    await self.sessions.add_message(
                         session_id,
                         {"role": "tool", "tool_call_id": tc.id, "content": result},
                     )
@@ -849,7 +1084,7 @@ class Chat(commands.Cog):
                     {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                     for tc in choice.message.tool_calls
                 ]
-                self.sessions.add_message(session_id, assistant_msg)
+                await self.sessions.add_message(session_id, assistant_msg)
                 continue
 
             final_text = choice.message.content or ""
@@ -860,7 +1095,8 @@ class Chat(commands.Cog):
             return
 
         final_text = "\n".join(l for l in final_text.split("\n") if "Used tools:" not in l).rstrip()
-        self.sessions.add_message(session_id, {"role": "assistant", "content": final_text})
+        final_text = self._render_markdown_tables(final_text)
+        await self.sessions.add_message(session_id, {"role": "assistant", "content": final_text})
 
         notes_text = "\n".join(inline_notes)
         separator = "\n\n" if inline_notes and final_text else ""
@@ -887,6 +1123,16 @@ class Chat(commands.Cog):
         kwargs = {"content": full}
         if view:
             kwargs["view"] = view
+            prev = self.sessions._last_msgs.get(session_id)
+            if prev:
+                try:
+                    ch = self.bot.get_channel(prev[0])
+                    if ch:
+                        old = await ch.fetch_message(prev[1])
+                        await old.edit(view=None)
+                except (discord.HTTPException, discord.NotFound):
+                    pass
+            await self.sessions.set_last_msg(session_id, msg.channel.id, msg.id)
         try:
             await msg.edit(**kwargs)
         except discord.HTTPException:
@@ -907,8 +1153,8 @@ class Chat(commands.Cog):
         print(f"[Lantern AI] {ctx.author} (ID: {ctx.author.id}): /ai answer \"{message[:200]}\" search={search} upload={'yes' if upload else 'no'}")
 
         session_key = self._answer_session_key(ctx.author.id, ctx.channel_id)
-        self.sessions.create(session_key, ctx.author.id, user_context=self._build_user_context(ctx.guild, ctx.author.id, ctx.author))
-        self.sessions.search_enabled[session_key] = search
+        await self.sessions.create(session_key, ctx.author.id, user_context=self._build_user_context(ctx.guild, ctx.author.id, ctx.author))
+        await self.sessions.set_search(session_key, search)
 
         if upload:
             ct = upload.content_type or ""
@@ -926,11 +1172,11 @@ class Chat(commands.Cog):
             ):
                 text = raw.decode("utf-8", errors="replace")
                 text = f"{message}\n\n```\n{text[:50000]}```" if message else f"```\n{text[:50000]}```"
-                self.sessions.add_message(session_key, {"role": "user", "content": text})
+                await self.sessions.add_message(session_key, {"role": "user", "content": text})
 
             elif ext in IMAGE_EXTS and ct.startswith("image/"):
                 b64 = base64.b64encode(raw).decode()
-                self.sessions.add_message(session_key, {
+                await self.sessions.add_message(session_key, {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": message or "What's in this image?"},
@@ -940,7 +1186,7 @@ class Chat(commands.Cog):
 
             elif ext in VIDEO_EXTS and ct.startswith("video/"):
                 b64 = base64.b64encode(raw).decode()
-                self.sessions.add_message(session_key, {
+                await self.sessions.add_message(session_key, {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": message or "What's in this video?"},
@@ -951,7 +1197,7 @@ class Chat(commands.Cog):
             elif ext in AUDIO_EXTS and ct.startswith("audio/"):
                 b64 = base64.b64encode(raw).decode()
                 fmt = ext or ct.split("/")[-1]
-                self.sessions.add_message(session_key, {
+                await self.sessions.add_message(session_key, {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": message or "What's in this audio?"},
@@ -972,7 +1218,7 @@ class Chat(commands.Cog):
                     b64 = base64.b64encode(img_bytes).decode()
                     parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
                 doc.close()
-                self.sessions.add_message(session_key, {"role": "user", "content": parts})
+                await self.sessions.add_message(session_key, {"role": "user", "content": parts})
 
             else:
                 await ctx.followup.send(
@@ -985,7 +1231,7 @@ class Chat(commands.Cog):
                 )
                 return
         else:
-            self.sessions.add_message(session_key, {"role": "user", "content": message or "..."})
+            await self.sessions.add_message(session_key, {"role": "user", "content": message or "..."})
 
         async with self._lock:
             msg = await ctx.followup.send(content="-# Thinking...")

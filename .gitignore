@@ -5,6 +5,7 @@ config.json
 sfx/
 mcp.json
 .DS_Store
+*.db
 
 # NODE
 # Logs

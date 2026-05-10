@@ -1,4 +1,5 @@
 import os
+import sys
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -16,6 +17,11 @@ if not TOKEN:
 
 # Convert GUILD_ID to a list of integers if it exists
 guild_ids = [int(GUILD_ID)] if GUILD_ID else None
+
+# Disable session persistence if --no-db flag is passed
+if "--no-db" in sys.argv:
+    os.environ["LANTERN_NO_DB"] = "1"
+    print("[Lantern AI] Running without session persistence (--no-db)")
 
 
 # Initialize the bot
