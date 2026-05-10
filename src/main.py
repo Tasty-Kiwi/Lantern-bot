@@ -64,7 +64,7 @@ async def about(ctx: discord.ApplicationContext):
         title="About Lantern",
         description="Hi! I am Lantern, a utility bot for various private servers.",
         color=discord.Color.blue(),
-    ).set_footer(text="v5.0.0, © 2026 tasty kiwi")
+    ).set_footer(text="v5.1.0, © 2026 tasty kiwi")
     await ctx.send_response(embed=embed)
 
 

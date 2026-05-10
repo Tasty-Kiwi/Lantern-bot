@@ -608,14 +608,6 @@ class Chat(commands.Cog):
         {
             "type": "function",
             "function": {
-                "name": "get_date_time",
-                "description": "Get the current date, time, and timezone",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
                 "name": "calculate",
                 "description": "Evaluate a mathematical expression safely",
                 "parameters": {
@@ -694,14 +686,30 @@ class Chat(commands.Cog):
             "type": "function",
             "function": {
                 "name": "get_weather",
-                "description": "Get current weather for a location. No API key needed.",
+                "description": "Get current weather, forecast, AQI, and pollen for a location. No API key needed.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "location": {
                             "type": "string",
                             "description": "City name (e.g., 'London', 'New York', 'Tokyo')",
-                        }
+                        },
+                        "forecast_days": {
+                            "type": "integer",
+                            "description": "Number of forecast days to include (0 = current only, max 5)",
+                        },
+                        "include_aqi": {
+                            "type": "boolean",
+                            "description": "Include Air Quality Index",
+                        },
+                        "include_pollen": {
+                            "type": "boolean",
+                            "description": "Include pollen counts",
+                        },
+                        "include_hourly": {
+                            "type": "boolean",
+                            "description": "Include today's hourly breakdown (3-hour intervals)",
+                        },
                     },
                     "required": ["location"],
                 },
@@ -713,14 +721,7 @@ class Chat(commands.Cog):
     COLOR_REGEX = re.compile(r"^[0-9a-fA-F]{6}$")
 
     async def _call_builtin_tool(self, name: str, args: dict, destination=None, requester_id: int | None = None) -> str:
-        if name == "get_date_time":
-            now = datetime.datetime.now(datetime.timezone.utc)
-            return (
-                f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M:%S')}\n"
-                f"Timezone: UTC\n"
-                f"Unix timestamp: {int(now.timestamp())}"
-            )
-        elif name == "calculate":
+        if name == "calculate":
             expr = args.get("expression", "")
             allowed = {
                 "abs", "round", "min", "max", "sum", "pow",
@@ -899,6 +900,11 @@ class Chat(commands.Cog):
         if not location:
             return "Please specify a location."
 
+        forecast_days = max(0, min(5, args.get("forecast_days") or 0))
+        include_aqi = args.get("include_aqi", False)
+        include_pollen = args.get("include_pollen", False)
+        include_hourly = args.get("include_hourly", False)
+
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 geo = await client.get(
@@ -909,46 +915,122 @@ class Chat(commands.Cog):
                 geo_data = geo.json()
                 if not geo_data.get("results"):
                     return f"Could not find a location named '{location}'."
-                result = geo_data["results"][0]
-                lat, lon = result["latitude"], result["longitude"]
-                name = f"{result.get('name', location)}, {result.get('country', '')}"
+                r = geo_data["results"][0]
+                lat, lon = r["latitude"], r["longitude"]
+                name = f"{r.get('name', location)}, {r.get('country', '')}"
 
-                weather = await client.get(
-                    "https://api.open-meteo.com/v1/forecast",
-                    params={
-                        "latitude": lat, "longitude": lon,
-                        "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
-                        "timezone": "auto",
-                    },
-                )
+                current_params = "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,precipitation,pressure_msl,cloud_cover,uv_index"
+                params = {"latitude": lat, "longitude": lon, "current": current_params, "timezone": "auto"}
+                if forecast_days:
+                    params["daily"] = "temperature_2m_max,temperature_2m_min,weather_code,precipitation_sum,wind_speed_10m_max"
+                    params["forecast_days"] = forecast_days
+                if include_hourly:
+                    params["hourly"] = "temperature_2m,precipitation,weather_code"
+
+                weather = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
                 weather.raise_for_status()
-                w = weather.json()["current"]
+                w = weather.json()
+                cur = w.get("current", {})
 
-                code = self.WMO_CODES.get(w.get("weather_code"), "Unknown")
-                temp = w.get("temperature_2m", "?")
-                feels = w.get("apparent_temperature", "?")
-                humidity = w.get("relative_humidity_2m", "?")
-                wind = w.get("wind_speed_10m", "?")
+                code = self.WMO_CODES.get(cur.get("weather_code"), "Unknown")
+                temp = cur.get("temperature_2m", "?")
+                feels = cur.get("apparent_temperature", "?")
+                humidity = cur.get("relative_humidity_2m", "?")
+                wind = cur.get("wind_speed_10m", "?")
+                precip = cur.get("precipitation")
+                pressure = cur.get("pressure_msl")
+                cloud = cur.get("cloud_cover")
+                uv = cur.get("uv_index")
 
-                allergens = await client.get(
-                    "https://air-quality-api.open-meteo.com/v1/air-quality",
-                    params={
-                        "latitude": lat, "longitude": lon,
-                        "current": "alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,olive_pollen,ragweed_pollen",
-                    },
-                )
-                parts = [
-                    f"Weather in {name}: {code}, {temp}\u00b0C (feels like {feels}\u00b0C). "
-                    f"Humidity: {humidity}%. Wind: {wind} km/h."
-                ]
-                if allergens.status_code == 200:
-                    a = allergens.json().get("current", {})
-                    pollen = [
-                        f"{k.replace('_pollen', '').title()} {v}"
-                        for k, v in a.items() if isinstance(v, (int, float)) and v is not None
-                    ]
-                    if pollen:
-                        parts.append("Allergens: " + ", ".join(pollen) + " grains/m\u00b3")
+                parts = [f"Weather in {name}: {code}, {temp}\u00b0C (feels like {feels}\u00b0C). Humidity: {humidity}%. Wind: {wind} km/h."]
+                extra = []
+                if precip is not None:
+                    extra.append(f"Precipitation: {precip} mm")
+                if pressure is not None:
+                    extra.append(f"Pressure: {pressure} hPa")
+                if cloud is not None:
+                    extra.append(f"Cloud cover: {cloud}%")
+                if uv is not None:
+                    extra.append(f"UV index: {uv}")
+                if extra:
+                    parts[-1] += " " + ". ".join(extra) + "."
+
+                if include_aqi or include_pollen:
+                    aq_params = []
+                    if include_aqi:
+                        aq_params.extend(["european_aqi", "us_aqi"])
+                    if include_pollen:
+                        aq_params.extend(["alder_pollen", "birch_pollen", "grass_pollen", "mugwort_pollen", "olive_pollen", "ragweed_pollen"])
+                    if aq_params:
+                        aqr = await client.get(
+                            "https://air-quality-api.open-meteo.com/v1/air-quality",
+                            params={"latitude": lat, "longitude": lon, "current": ",".join(aq_params)},
+                        )
+                        if aqr.status_code == 200:
+                            aq = aqr.json().get("current", {})
+                            if include_aqi:
+                                e = aq.get("european_aqi")
+                                u = aq.get("us_aqi")
+                                if e is not None:
+                                    parts.append(f"AQI (European): {e}")
+                                if u is not None:
+                                    parts.append(f"AQI (US): {u}")
+                            if include_pollen:
+                                pollen = [
+                                    f"{k.replace('_pollen', '').title()} {v}"
+                                    for k, v in aq.items() if "_pollen" in k and isinstance(v, (int, float)) and v is not None
+                                ]
+                                if pollen:
+                                    parts.append("Allergens: " + ", ".join(pollen) + " grains/m\u00b3")
+
+                if forecast_days and w.get("daily"):
+                    d = w["daily"]
+                    headers = ["Day", "High", "Low", "Condition", "Precip"]
+                    rows = []
+                    dates = d.get("time", [])
+                    highs = d.get("temperature_2m_max", [])
+                    lows = d.get("temperature_2m_min", [])
+                    codes = d.get("weather_code", [])
+                    precips = d.get("precipitation_sum", [])
+                    for i, date_str in enumerate(dates):
+                        try:
+                            dt = datetime.datetime.fromisoformat(date_str)
+                            day_name = dt.strftime("%a")
+                        except (ValueError, TypeError):
+                            day_name = date_str
+                        hi = f"{highs[i]}\u00b0C" if i < len(highs) else "?"
+                        lo = f"{lows[i]}\u00b0C" if i < len(lows) else "?"
+                        cond = self.WMO_CODES.get(codes[i] if i < len(codes) else None, "?")
+                        pcp = f"{precips[i]}mm" if i < len(precips) else "?"
+                        rows.append([day_name, hi, lo, cond, pcp])
+                    parts.append(f"\n| {' | '.join(headers)} |")
+                    parts.append(f"|{'|'.join('-' * len(h) for h in headers)}|")
+                    for row in rows:
+                        parts.append(f"| {' | '.join(row)} |")
+
+                if include_hourly and w.get("hourly"):
+                    h = w["hourly"]
+                    headers = ["Time", "Temp", "Precip"]
+                    rows = []
+                    times = h.get("time", [])
+                    temps = h.get("temperature_2m", [])
+                    precips = h.get("precipitation", [])
+                    step = max(1, len(times) // 8)  # ~8 rows max
+                    for i in range(0, len(times), step):
+                        t = times[i]
+                        try:
+                            dt = datetime.datetime.fromisoformat(t)
+                            label = dt.strftime("%H:%M")
+                        except (ValueError, TypeError):
+                            label = str(t)
+                        tp = f"{temps[i]}\u00b0C" if i < len(temps) else "?"
+                        pc = f"{precips[i]}mm" if i < len(precips) else "?"
+                        rows.append([label, tp, pc])
+                    parts.append(f"\n| {' | '.join(headers)} |")
+                    parts.append(f"|{'|'.join('-' * len(h) for h in headers)}|")
+                    for row in rows:
+                        parts.append(f"| {' | '.join(row)} |")
+
                 return "\n".join(parts)
         except httpx.HTTPError as e:
             return f"Weather API error: {e}"
