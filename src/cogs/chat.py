@@ -299,6 +299,15 @@ class Database:
                 )
             """)
             c.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)")
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS memories (
+                    user_id INTEGER NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (user_id, key)
+                )
+            """)
             for col in ("last_channel_id", "last_message_id"):
                 try:
                     c.execute(f"ALTER TABLE sessions ADD COLUMN {col} INTEGER")
@@ -342,6 +351,30 @@ class Database:
             c.execute("DELETE FROM messages WHERE session_id IN (SELECT session_id FROM sessions WHERE last_activity < ?)", (cutoff,))
             c.execute("DELETE FROM sessions WHERE last_activity < ?", (cutoff,))
         await asyncio.to_thread(self._run, _clean)
+
+    async def load_memories(self, user_id: int) -> list[tuple[str, str]]:
+        def _load(c):
+            c.execute("SELECT key, value FROM memories WHERE user_id = ? ORDER BY key", (user_id,))
+            return c.fetchall()
+        return await asyncio.to_thread(self._run, _load)
+
+    async def save_memory(self, user_id: int, key: str, value: str):
+        def _save(c):
+            c.execute(
+                "INSERT OR REPLACE INTO memories (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)",
+                (user_id, key, value, datetime.datetime.now(datetime.timezone.utc).timestamp()),
+            )
+        await asyncio.to_thread(self._run, _save)
+
+    async def delete_memory(self, user_id: int, key: str):
+        def _del(c):
+            c.execute("DELETE FROM memories WHERE user_id = ? AND key = ?", (user_id, key))
+        await asyncio.to_thread(self._run, _del)
+
+    async def clear_memories(self, user_id: int):
+        def _clear(c):
+            c.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+        await asyncio.to_thread(self._run, _clear)
 
     async def load_all(self):
         def _load(c):
@@ -391,6 +424,7 @@ class SessionManager:
         self.user_contexts = {}
         self.search_enabled = {}
         self._last_msgs = {}
+        self.stopped = set()
 
     async def init_db(self):
         if self.db:
@@ -715,9 +749,65 @@ class Chat(commands.Cog):
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "store_memory",
+                "description": "Store a fact about the user for future conversations (e.g., location, preferences, occupation). Call this when the user says 'remember', 'save', or shares personal info they want kept.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Short snake_case identifier (e.g., 'home_location', 'occupation', 'timezone')",
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "The fact to remember",
+                        },
+                    },
+                    "required": ["key", "value"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "stop_discussion",
+                "description": "Immediately stop the current discussion. Use this when the conversation becomes harmful, toxic, or violates safety guidelines.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
     ]
 
     _BUILTIN_NAMES = {t["function"]["name"] for t in BUILTIN_TOOLS}
+
+    SEARCH_TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "wikipedia_search",
+                "description": "Search Wikipedia for a query and return article summaries. Includes relevant excerpts from matching articles.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search term to look up on Wikipedia",
+                        },
+                        "lang": {
+                            "type": "string",
+                            "description": "Wikipedia language code (e.g., 'en', 'fr', 'de'). Defaults to 'en'.",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+    ]
+
+    _SEARCH_NAMES = {t["function"]["name"] for t in SEARCH_TOOLS}
+
     COLOR_REGEX = re.compile(r"^[0-9a-fA-F]{6}$")
 
     async def _call_builtin_tool(self, name: str, args: dict, destination=None, requester_id: int | None = None) -> str:
@@ -745,9 +835,66 @@ class Chat(commands.Cog):
             return await self._handle_set_color(args, destination, requester_id)
         elif name == "clear_user_color":
             return await self._handle_clear_color(args, destination, requester_id)
+        elif name == "store_memory":
+            return await self._handle_store_memory(args, requester_id)
+        elif name == "stop_discussion":
+            return "__STOP__"
         elif name == "get_weather":
             return await self._handle_weather(args)
         return f"Unknown built-in tool: {name}"
+
+    async def _call_search_tool(self, name: str, args: dict) -> str:
+        if name == "wikipedia_search":
+            query = args.get("query", "")
+            lang = args.get("lang", "en")
+            if not query:
+                return "Error: no query provided."
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    search_url = f"https://{lang}.wikipedia.org/w/api.php"
+                    params = {
+                        "action": "query",
+                        "list": "search",
+                        "srsearch": query,
+                        "srlimit": 1,
+                        "format": "json",
+                    }
+                    sr = await client.get(search_url, params=params)
+                    sr.raise_for_status()
+                    results = sr.json().get("query", {}).get("search", [])
+                    if not results:
+                        return f"No Wikipedia results found for '{query}'."
+                    title = results[0]["title"]
+                    extract_url = f"https://{lang}.wikipedia.org/w/api.php"
+                    eparams = {
+                        "action": "query",
+                        "titles": title,
+                        "prop": "extracts",
+                        "exintro": True,
+                        "explaintext": True,
+                        "exsentences": 5,
+                        "format": "json",
+                    }
+                    er = await client.get(extract_url, params=eparams)
+                    er.raise_for_status()
+                    pages = er.json().get("query", {}).get("pages", {})
+                    extract = ""
+                    for pid, page in pages.items():
+                        if pid != "-1":
+                            extract = page.get("extract", "")
+                    snippet = results[0].get("snippet", "")
+                    url = f"https://{lang}.wikipedia.org/wiki/{title.replace(' ', '_')}"
+                    parts = [f"**{title}**\n{url}"]
+                    if extract:
+                        parts.append(extract)
+                    elif snippet:
+                        parts.append(snippet)
+                    return "\n\n".join(parts)
+            except httpx.HTTPError as e:
+                return f"Wikipedia error: {e}"
+            except Exception as e:
+                return f"Wikipedia error: {e}"
+        return f"Unknown search tool: {name}"
 
     async def _handle_set_color(self, args: dict, destination, requester_id: int | None = None) -> str:
         guild = getattr(destination, "guild", None) if destination else None
@@ -835,10 +982,10 @@ class Chat(commands.Cog):
 
     def _get_all_tools(self):
         mcp_tools = self.mcp.get_openai_tools()
-        builtin = list(self.BUILTIN_TOOLS)
+        all_tools = list(self.BUILTIN_TOOLS) + list(self.SEARCH_TOOLS)
         if mcp_tools:
-            return mcp_tools + builtin
-        return builtin if builtin else None
+            return mcp_tools + all_tools
+        return all_tools if all_tools else None
 
     def _render_markdown_tables(self, text: str) -> str:
         lines = text.split("\n")
@@ -881,6 +1028,115 @@ class Chat(commands.Cog):
             i += 1
         return "\n".join(result)
 
+    async def _strip_tables_to_images(self, text: str) -> tuple[str, list[discord.File]]:
+        lines = text.split("\n")
+        out = []
+        tables = []
+        i = 0
+        while i < len(lines):
+            if lines[i].strip().startswith("|") and "|" in lines[i]:
+                tbl = []
+                while i < len(lines) and lines[i].strip().startswith("|"):
+                    tbl.append(lines[i].strip())
+                    i += 1
+                if len(tbl) >= 2 and re.match(r"^\|[-:| ]+\|$", tbl[1]):
+                    hdrs = [c.strip() for c in tbl[0].split("|")[1:-1]]
+                    rws = []
+                    for rl in tbl[2:]:
+                        cells = [c.strip() for c in rl.split("|")[1:-1]]
+                        if cells:
+                            rws.append(cells)
+                    if hdrs:
+                        tables.append((hdrs, rws))
+                    continue
+            out.append(lines[i])
+            i += 1
+
+        files = []
+        for idx, (hdrs, rws) in enumerate(tables[:5]):
+            try:
+                fname = f"table_{idx}.png"
+                img = self._table_to_image(hdrs, rws, fname)
+                files.append(img)
+            except Exception:
+                pass
+
+        clean = "\n".join(out)
+        if files:
+            note = f"\n-# *{len(files)} table(s) rendered below*"
+            clean += note
+        return clean, files
+
+    def _table_to_image(self, headers: list, rows: list, filename: str = "table.png") -> discord.File:
+        from PIL import Image, ImageDraw, ImageFont
+        import io
+
+        font_path = None
+        for p in ("/System/Library/Fonts/Menlo.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"):
+            if os.path.exists(p):
+                font_path = p
+                break
+        font = ImageFont.truetype(font_path, 14) if font_path else ImageFont.load_default()
+        bold_font = ImageFont.truetype(font_path, 14) if font_path else ImageFont.load_default()
+
+        pad_x, pad_y = 10, 5
+        col_w = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                if i < len(col_w):
+                    col_w[i] = max(col_w[i], len(str(cell)))
+
+        # measure using font
+        def tw(t):
+            return font.getbbox(t)[2] - font.getbbox(t)[0]
+
+        px_w = [tw(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                if i < len(px_w):
+                    px_w[i] = max(px_w[i], tw(str(cell)))
+        px_w = [w + pad_x * 2 for w in px_w]
+        total_w = sum(px_w) + 1
+
+        cell_h = font.getbbox("Ay")[3] - font.getbbox("Ay")[1] + pad_y * 2
+        header_h = cell_h + 2
+        total_h = header_h + len(rows) * cell_h + 1
+
+        img = Image.new("RGB", (total_w, total_h), (43, 45, 49))
+        draw = ImageDraw.Draw(img)
+
+        y = 0
+        # header
+        x = 0
+        for i, h in enumerate(headers):
+            w = min(px_w[i], total_w - x - (1 if i < len(px_w) - 1 else 0))
+            draw.rectangle([x, y, x + w, y + header_h], fill=(32, 34, 37))
+            tw_val = tw(h)
+            draw.text((x + (w - tw_val) // 2, y + pad_y), h, font=bold_font, fill=(255, 255, 255))
+            x += w
+        y += header_h
+
+        # separator line
+        draw.line([(0, y), (total_w, y)], fill=(148, 155, 164), width=1)
+        y += 1
+
+        # rows
+        for ri, row in enumerate(rows):
+            x = 0
+            bg = (53, 55, 59) if ri % 2 == 0 else (43, 45, 49)
+            for i, cell in enumerate(row):
+                w = min(px_w[i], total_w - x - (1 if i < len(px_w) - 1 else 0))
+                draw.rectangle([x, y, x + w, y + cell_h], fill=bg)
+                tw_val = tw(str(cell))
+                draw.text((x + pad_x, y + pad_y), str(cell), font=font, fill=(220, 220, 220))
+                x += w
+            y += cell_h
+
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        buf.seek(0)
+        return discord.File(buf, filename=filename)
+
     WMO_CODES = {
         0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
         45: "Foggy", 48: "Depositing rime fog",
@@ -894,6 +1150,17 @@ class Chat(commands.Cog):
         85: "Slight snow showers", 86: "Heavy snow showers",
         95: "Thunderstorm", 96: "Thunderstorm with slight hail", 99: "Thunderstorm with heavy hail",
     }
+
+    async def _handle_store_memory(self, args: dict, requester_id: int | None = None) -> str:
+        key = args.get("key", "").strip()
+        value = args.get("value", "").strip()
+        if not key or not value:
+            return "Both key and value are required."
+        if requester_id is None:
+            return "Could not determine your user ID."
+        if self.sessions.db:
+            await self.sessions.db.save_memory(requester_id, key, value)
+        return f"Saved memory: `{key}` = `{value}`."
 
     async def _handle_weather(self, args: dict) -> str:
         location = args.get("location", "").strip()
@@ -1083,6 +1350,7 @@ class Chat(commands.Cog):
         seen_calls = set()
         tool_notes: dict[str, int] = {}
         final_text = None
+        discussion_stopped = False
 
         def embed_with(text):
             return self._build_answer_embed(text, username, question)
@@ -1094,6 +1362,15 @@ class Chat(commands.Cog):
             stored_context = self.sessions.user_contexts.get(session_id)
             if stored_context:
                 ctx_parts.append({"role": "system", "content": stored_context})
+
+            if author_id and self.sessions.db:
+                memories = await self.sessions.db.load_memories(author_id)
+                if memories:
+                    lines = [f"- {k}: {v}" for k, v in memories]
+                    ctx_parts.append({
+                        "role": "system",
+                        "content": "User memories:\n" + "\n".join(lines),
+                    })
 
             if destination:
                 guild = getattr(destination, "guild", None)
@@ -1160,13 +1437,22 @@ class Chat(commands.Cog):
 
                         if tc.function.name in self._BUILTIN_NAMES:
                             result = await self._call_builtin_tool(tc.function.name, args, destination, requester_id=author_id)
+                        elif tc.function.name in self._SEARCH_NAMES:
+                            result = await self._call_search_tool(tc.function.name, args)
                         else:
                             result = await self.mcp.call_tool(tc.function.name, args)
+
+                        if result == "__STOP__":
+                            discussion_stopped = True
+                            break
 
                     await self.sessions.add_message(
                         session_id,
                         {"role": "tool", "tool_call_id": tc.id, "content": result},
                     )
+
+                if discussion_stopped:
+                    break
 
                 notes_text = "\n".join(f"-# Used: {n}{f' {c}x' if c > 1 else ''}" for n, c in tool_notes.items())
                 await msg.edit(embeds=[embed_with(f"{notes_text}\n-# Thinking...")])
@@ -1182,12 +1468,21 @@ class Chat(commands.Cog):
             final_text = choice.message.content or ""
             break
 
+        if discussion_stopped:
+            await msg.edit(
+                content=None,
+                embeds=[discord.Embed(description="This discussion has been stopped. This was logged to the host. Remember that misuse of the AI may result in restriction of usage.", color=discord.Color.orange())],
+                view=None,
+            )
+            await self.sessions.forget(session_id)
+            return
+
         if final_text is None:
             await msg.edit(embeds=[embed_with("I had trouble processing your request. Please try again.")])
             return
 
         final_text = "\n".join(l for l in final_text.split("\n") if "Used tools:" not in l).rstrip()
-        final_text = self._render_markdown_tables(final_text)
+        final_text, table_files = await self._strip_tables_to_images(final_text)
         await self.sessions.add_message(session_id, {"role": "assistant", "content": final_text})
 
         notes_text = "\n".join(f"-# Used: {n}{f' {c}x' if c > 1 else ''}" for n, c in tool_notes.items())
@@ -1223,13 +1518,21 @@ class Chat(commands.Cog):
                 except (discord.HTTPException, discord.NotFound):
                     pass
             await self.sessions.set_last_msg(session_id, msg.channel.id, msg.id)
+            kwargs = {"embeds": [embed_with(full)], "view": view}
+            if table_files:
+                kwargs["files"] = table_files
+                kwargs["embeds"][0].set_image(url="attachment://table_0.png")
             try:
-                await msg.edit(embeds=[embed_with(full)], view=view)
+                await msg.edit(**kwargs)
             except discord.HTTPException:
                 pass
         else:
+            kwargs = {"embeds": [embed_with(full)]}
+            if table_files:
+                kwargs["files"] = table_files
+                kwargs["embeds"][0].set_image(url="attachment://table_0.png")
             try:
-                await msg.edit(embeds=[embed_with(full)])
+                await msg.edit(**kwargs)
             except discord.HTTPException:
                 pass
 
@@ -1332,6 +1635,51 @@ class Chat(commands.Cog):
             init_embed = self._build_answer_embed("-# Thinking...", str(ctx.author), message)
             msg = await ctx.followup.send(embed=init_embed)
             await self._stream_response(session_key, msg, destination=ctx.channel, author_id=ctx.author.id, view=FollowUpView(self, ctx.author.id, session_key, ctx.channel_id), username=str(ctx.author), question=message)
+
+    memories = ai.create_subgroup("memories", "Manage your stored memories")
+
+    @memories.command(name="list", description="Show all your stored memories")
+    async def memories_list(self, ctx: discord.ApplicationContext):
+        if not self.sessions.db:
+            await ctx.send_response("Memories are not available (running with --no-db).", ephemeral=True)
+            return
+        mems = await self.sessions.db.load_memories(ctx.author.id)
+        if not mems:
+            await ctx.send_response("You have no stored memories.", ephemeral=True)
+            return
+        lines = [f"**{k}**: {v}" for k, v in mems]
+        try:
+            await ctx.author.send("**Your stored memories:**\n" + "\n".join(lines))
+            await ctx.send_response("Sent you a DM with your memories.", ephemeral=True)
+        except discord.HTTPException:
+            await ctx.send_response("Your stored memories:\n" + "\n".join(lines), ephemeral=True)
+
+    @memories.command(name="add", description="Add or update a memory for the AI to remember")
+    async def memories_add(
+        self,
+        ctx: discord.ApplicationContext,
+        key: str = discord.Option(str, description="Short identifier (e.g., 'talking_style', 'home_location')"),
+        value: str = discord.Option(str, description="What to remember"),
+    ):
+        if self.sessions.db:
+            await self.sessions.db.save_memory(ctx.author.id, key, value)
+        await ctx.send_response(f"Saved memory `{key}`.", ephemeral=True)
+
+    @memories.command(name="clear", description="Delete all your stored memories")
+    async def memories_clear(self, ctx: discord.ApplicationContext):
+        if self.sessions.db:
+            await self.sessions.db.clear_memories(ctx.author.id)
+        await ctx.send_response("All memories cleared.", ephemeral=True)
+
+    @memories.command(name="forget", description="Delete a specific memory by key")
+    async def memories_forget(
+        self,
+        ctx: discord.ApplicationContext,
+        key: str = discord.Option(str, description="Memory key to delete (e.g., 'home_location')"),
+    ):
+        if self.sessions.db:
+            await self.sessions.db.delete_memory(ctx.author.id, key)
+        await ctx.send_response(f"Memory `{key}` deleted.", ephemeral=True)
 
     async def _ai_complete(self, messages: list, tools) -> openai.types.chat.ChatCompletion:
         is_multimodal = any(isinstance(m.get("content"), list) for m in messages)

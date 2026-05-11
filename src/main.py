@@ -39,7 +39,11 @@ class LanternBot(commands.Bot):
 
 bot = LanternBot(
     intents=discord.Intents(
-        guilds=True, voice_states=True, members=True, messages=True, message_content=True
+        guilds=True,
+        voice_states=True,
+        members=True,
+        messages=True,
+        message_content=True,
     )
 )  # messages + message_content for chat cog
 
@@ -60,11 +64,20 @@ async def about(ctx: discord.ApplicationContext):
     """
     Returns information about the bot.
     """
-    embed = discord.Embed(
-        title="About Lantern",
-        description="Hi! I am Lantern, a utility bot for various private servers.",
-        color=discord.Color.blue(),
-    ).set_footer(text="v5.1.0, © 2026 tasty kiwi")
+    embed = (
+        discord.Embed(
+            title="About Lantern",
+            description="Hi! I am Lantern, a utility bot for various private servers.",
+            color=discord.Color.blue(),
+        )
+        .add_field(
+            name="AI Privacy Policy",
+            value="""Your conversations are stored on the host's machine for 24 hours.
+The AI memories are stored indefinitely on the host's machine. If you want to remove them, run the `/ai memories clear` command.
+The AI is provided by Nvidia, and they may collect data for security and training purposes.""",
+        )
+        .set_footer(text="v5.1.0, © 2026 tasty kiwi")
+    )
     await ctx.send_response(embed=embed)
 
 
