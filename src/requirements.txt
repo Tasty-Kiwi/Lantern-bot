@@ -2,5 +2,7 @@ py-cord
 python-dotenv
 webcolors
 PyNaCl
+httpx
+yt-dlp
 openai
 mcp
