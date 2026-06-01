@@ -1,11 +1,10 @@
 import html
 import asyncio
-import io
 import json
 import os
 import re
-import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlencode, urlparse, urlunparse
@@ -19,7 +18,7 @@ GUILD_ID = os.getenv("GUILD_ID")
 GUILD_IDS = [int(GUILD_ID)] if GUILD_ID else None
 
 HTTP_TIMEOUT = 10
-MAX_UPLOAD_BYTES = int(os.getenv("EMBEDIFY_MAX_UPLOAD_MB", "24")) * 1024 * 1024
+YTDLP_TIMEOUT = 20
 USER_AGENT = (
     "LanternBot/5.1 (+https://github.com/tastykiwi/lantern-bot; Discord bot link preview)"
 )
@@ -45,21 +44,24 @@ SUPPORTED_HOSTS = {
 }
 
 
+class TweetNotFound(Exception):
+    pass
+
+
 @dataclass
 class EmbedMetadata:
     platform: str
     url: str
-    title: str
+    title: str | None = None
     description: str | None = None
     author: str | None = None
     author_url: str | None = None
+    author_icon_url: str | None = None
     image_url: str | None = None
     thumbnail_url: str | None = None
     media_url: str | None = None
     media_kind: str | None = None
-    media_ext: str | None = None
-    media_size: int | None = None
-    media_headers: dict[str, str] | None = None
+    timestamp: datetime | None = None
     footer: str | None = None
 
 
@@ -120,7 +122,9 @@ def strip_html(value: str | None) -> str:
 
 
 def truncate(value: str | None, limit: int) -> str | None:
-    text = normalize_whitespace(value)
+    if value is None:
+        return None
+    text = html.unescape(value).strip()
     if not text:
         return None
     if len(text) <= limit:
@@ -145,8 +149,12 @@ def classify_url(url: str) -> tuple[str | None, str | None]:
     host = parsed.netloc.lower()
     for platform, hosts in SUPPORTED_HOSTS.items():
         if host in hosts:
-            if platform == "X" and "/status/" not in parsed.path:
-                return None, "Please provide a direct X/Twitter status URL."
+            if platform == "X":
+                if "/status/" not in parsed.path:
+                    return None, "Please provide a direct X/Twitter status URL."
+                tweet_id = extract_tweet_id(url)
+                if not tweet_id or not (1 <= len(tweet_id) <= 19):
+                    return None, "That doesn't look like a valid X/Twitter status URL."
             if (
                 platform == "Reddit"
                 and host != "redd.it"
@@ -298,7 +306,6 @@ def metadata_from_ytdlp(platform: str, url: str) -> EmbedMetadata | None:
     media = select_media(info)
     media_url = valid_media_url(media.get("url")) if media else None
     media_ext = media.get("ext") if media else None
-    media_size = media.get("filesize") or media.get("filesize_approx") if media else None
     media_kind = media_kind_from_url(media_url, media_ext)
     thumbnail_url = valid_media_url(info.get("thumbnail"))
 
@@ -313,90 +320,18 @@ def metadata_from_ytdlp(platform: str, url: str) -> EmbedMetadata | None:
         thumbnail_url=thumbnail_url,
         media_url=media_url,
         media_kind=media_kind,
-        media_ext=media_ext,
-        media_size=media_size,
-        media_headers=info.get("http_headers"),
         footer=f"{platform} preview",
     )
 
 
 async def extract_with_ytdlp(platform: str, url: str) -> EmbedMetadata | None:
     try:
-        return await asyncio.to_thread(metadata_from_ytdlp, platform, url)
-    except Exception:
+        return await asyncio.wait_for(
+            asyncio.to_thread(metadata_from_ytdlp, platform, url),
+            timeout=YTDLP_TIMEOUT,
+        )
+    except (asyncio.TimeoutError, Exception):
         return None
-
-
-def download_media_with_ytdlp(metadata: EmbedMetadata) -> tuple[bytes, str] | None:
-    try:
-        import yt_dlp
-    except ImportError:
-        return None
-
-    with tempfile.TemporaryDirectory(prefix="lantern-embedify-") as tmp:
-        options = {
-            "quiet": True,
-            "no_warnings": True,
-            "noprogress": True,
-            "noplaylist": True,
-            "cachedir": False,
-            "logger": YtDlpLogger(),
-            "max_filesize": MAX_UPLOAD_BYTES,
-            "outtmpl": os.path.join(tmp, "%(id)s.%(ext)s"),
-        }
-
-        try:
-            with yt_dlp.YoutubeDL(options) as ydl:
-                ydl.extract_info(metadata.url, download=True)
-        except Exception:
-            return None
-
-        files = [
-            os.path.join(tmp, filename)
-            for filename in os.listdir(tmp)
-            if os.path.isfile(os.path.join(tmp, filename))
-        ]
-        if not files:
-            return None
-
-        path = max(files, key=os.path.getsize)
-        if os.path.getsize(path) > MAX_UPLOAD_BYTES:
-            return None
-
-        with open(path, "rb") as file:
-            return file.read(), os.path.basename(path)
-
-
-async def download_media_with_httpx(metadata: EmbedMetadata) -> discord.File | None:
-    if not metadata.media_url:
-        return None
-    if metadata.media_size and metadata.media_size > MAX_UPLOAD_BYTES:
-        return None
-
-    headers = {
-        "User-Agent": USER_AGENT,
-        **(metadata.media_headers or {}),
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
-            async with client.stream("GET", metadata.media_url) as response:
-                response.raise_for_status()
-
-                content_length = response.headers.get("content-length")
-                if content_length and int(content_length) > MAX_UPLOAD_BYTES:
-                    return None
-
-                buffer = io.BytesIO()
-                async for chunk in response.aiter_bytes():
-                    buffer.write(chunk)
-                    if buffer.tell() > MAX_UPLOAD_BYTES:
-                        return None
-    except (httpx.HTTPError, ValueError):
-        return None
-
-    buffer.seek(0)
-    return discord.File(buffer, filename=media_filename(metadata))
 
 
 async def fetch_json(client: httpx.AsyncClient, url: str) -> Any:
@@ -414,6 +349,7 @@ async def fetch_text(client: httpx.AsyncClient, url: str) -> str:
 async def fetch_x_metadata(client: httpx.AsyncClient, url: str) -> EmbedMetadata:
     tweet_id = extract_tweet_id(url)
     syndication_data = None
+    not_found = False
 
     if tweet_id:
         try:
@@ -422,48 +358,121 @@ async def fetch_x_metadata(client: httpx.AsyncClient, url: str) -> EmbedMetadata
                 "https://cdn.syndication.twimg.com/tweet-result?"
                 f"{urlencode({'id': tweet_id, 'lang': 'en'})}",
             )
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                not_found = True
+            syndication_data = None
         except (httpx.HTTPError, TypeError, ValueError, json.JSONDecodeError):
             syndication_data = None
 
     if syndication_data:
         user = syndication_data.get("user") or {}
-        media = syndication_data.get("mediaDetails") or []
-        photo = next(
+        media_details = syndication_data.get("mediaDetails") or []
+
+        video_entry = next(
             (
                 item
-                for item in media
+                for item in media_details
+                if item.get("type") in {"video", "animated_gif"}
+            ),
+            None,
+        )
+        photo_entry = next(
+            (
+                item
+                for item in media_details
                 if item.get("type") == "photo" and item.get("media_url_https")
             ),
             None,
         )
-        video = next(
-            (
-                item
-                for item in media
-                if item.get("type") in {"video", "animated_gif"}
-                and item.get("media_url_https")
-            ),
-            None,
+
+        author_name = (user.get("name") or "").strip()
+        screen_name = (user.get("screen_name") or "").strip()
+        if author_name and screen_name:
+            author = f"{author_name} (@{screen_name})"
+        else:
+            author = author_name or None
+        author_url = (
+            f"https://x.com/{screen_name}" if screen_name else None
         )
+        author_icon_url = valid_media_url(
+            user.get("profile_image_url_https")
+        )
+
+        image_url = None
+        media_url = None
+        media_kind = None
+        thumbnail_url = None
+
+        if video_entry:
+            variants = (
+                video_entry.get("video_info", {}).get("variants", []) or []
+            )
+            mp4_variants = [
+                variant
+                for variant in variants
+                if variant.get("content_type") == "video/mp4"
+                and variant.get("url")
+            ]
+            if mp4_variants:
+                best = max(
+                    mp4_variants, key=lambda variant: variant.get("bitrate") or 0
+                )
+                media_url = valid_media_url(best.get("url"))
+                if media_url:
+                    media_kind = "video"
+            thumbnail_url = valid_media_url(video_entry.get("media_url_https"))
+        elif photo_entry:
+            image_url = valid_media_url(photo_entry.get("media_url_https"))
+            if image_url:
+                media_kind = "image"
+
+        timestamp = None
+        created_at = syndication_data.get("created_at")
+        if created_at:
+            try:
+                timestamp = datetime.strptime(
+                    created_at, "%a %b %d %H:%M:%S %z %Y"
+                )
+            except (TypeError, ValueError):
+                timestamp = None
+
+        text = syndication_data.get("text")
+        description = html.unescape(text).strip() if text else None
 
         return EmbedMetadata(
             platform="X",
             url=url,
-            title=user.get("name") or "X post",
-            description=syndication_data.get("text"),
-            author=user.get("screen_name") and f"@{user['screen_name']}",
-            author_url=user.get("screen_name")
-            and f"https://x.com/{user['screen_name']}",
-            image_url=valid_media_url(
-                (photo or video or {}).get("media_url_https")
-            ),
-            media_url=valid_media_url((photo or video or {}).get("media_url_https")),
-            media_kind="image",
-            footer="X/Twitter preview",
+            title=None,
+            description=description,
+            author=author,
+            author_url=author_url,
+            author_icon_url=author_icon_url,
+            image_url=image_url,
+            thumbnail_url=thumbnail_url,
+            media_url=media_url,
+            media_kind=media_kind,
+            timestamp=timestamp,
+            footer="X preview",
         )
 
     params = urlencode({"url": url, "omit_script": "true", "dnt": "true"})
-    data = await fetch_json(client, f"https://publish.twitter.com/oembed?{params}")
+    try:
+        data = await fetch_json(
+            client, f"https://publish.twitter.com/oembed?{params}"
+        )
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 404:
+            not_found = True
+        data = None
+    except (httpx.HTTPError, TypeError, ValueError, json.JSONDecodeError):
+        data = None
+
+    if not_found:
+        raise TweetNotFound(url)
+
+    if data is None:
+        raise httpx.HTTPError("X oembed returned no data")
 
     title = strip_html(data.get("html")) or "X post"
     author = data.get("author_name")
@@ -551,19 +560,28 @@ async def fetch_fallback_metadata(
     except httpx.HTTPError:
         pass
 
+    description = "Lantern could not fetch rich metadata for this link. The original URL is included below."
+    if platform == "TikTok":
+        description += (
+            " Tip: TikTok often blocks bot access — try a direct "
+            "tiktok.com/.../video/<id> link."
+        )
+
     return EmbedMetadata(
         platform=platform,
         url=url,
         title=f"{platform} post",
-        description="Lantern could not fetch rich metadata for this link, but the source is attached below.",
-        footer=f"{platform} preview",
+        description=description,
     )
 
 
 async def fetch_metadata(platform: str, url: str) -> EmbedMetadata:
-    extracted = await extract_with_ytdlp(platform, url)
-    if extracted and (extracted.media_url or extracted.description or extracted.thumbnail_url):
-        return extracted
+    if platform != "X":
+        extracted = await extract_with_ytdlp(platform, url)
+        if extracted and (
+            extracted.media_url or extracted.description or extracted.thumbnail_url
+        ):
+            return extracted
 
     headers = {
         "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
@@ -584,6 +602,8 @@ async def fetch_metadata(platform: str, url: str) -> EmbedMetadata:
                 return await fetch_tiktok_metadata(client, url)
             if platform == "Instagram":
                 return await fetch_instagram_metadata(client, url)
+        except TweetNotFound:
+            raise
         except (
             httpx.HTTPError,
             KeyError,
@@ -601,50 +621,42 @@ async def fetch_metadata(platform: str, url: str) -> EmbedMetadata:
     )
 
 
-def media_filename(metadata: EmbedMetadata) -> str:
-    ext = (metadata.media_ext or "").lower()
-    if not ext:
-        ext = "jpg" if metadata.media_kind == "image" else "mp4"
-    if ext == "jpeg":
-        ext = "jpg"
-    return f"{metadata.platform.lower()}-preview.{ext}"
-
-
-async def downloadable_media_file(metadata: EmbedMetadata) -> discord.File | None:
-    if not metadata.media_url or metadata.media_kind != "video":
-        return None
-
-    downloaded = await asyncio.to_thread(download_media_with_ytdlp, metadata)
-    if downloaded:
-        data, filename = downloaded
-        return discord.File(io.BytesIO(data), filename=filename)
-
-    return await download_media_with_httpx(metadata)
-
-
 def build_embed(metadata: EmbedMetadata) -> discord.Embed:
+    title = truncate(metadata.title, 256) if metadata.title else None
     embed = discord.Embed(
-        title=truncate(metadata.title, 256) or f"{metadata.platform} post",
+        title=title,
         url=metadata.url,
         description=truncate(metadata.description, 4096),
         color=PLATFORM_COLORS.get(metadata.platform, discord.Color.blurple().value),
+        timestamp=metadata.timestamp,
     )
 
     if metadata.author:
         embed.set_author(
             name=truncate(metadata.author, 256) or metadata.author,
             url=metadata.author_url,
+            icon_url=metadata.author_icon_url,
         )
 
     image_url = valid_media_url(metadata.image_url)
     thumbnail_url = valid_media_url(metadata.thumbnail_url)
+    media_url = valid_media_url(metadata.media_url)
 
     if image_url:
         embed.set_image(url=image_url)
+    elif metadata.media_kind == "video" and media_url:
+        embed._video = {"url": media_url}
+        if thumbnail_url:
+            embed.set_thumbnail(url=thumbnail_url)
     elif thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
 
-    if metadata.footer:
+    has_rich_content = bool(
+        image_url
+        or (metadata.media_kind == "video" and media_url)
+        or thumbnail_url
+    )
+    if metadata.footer and has_rich_content:
         embed.set_footer(text=truncate(metadata.footer, 2048) or metadata.platform)
 
     return embed
@@ -677,19 +689,27 @@ class Embedify(commands.Cog):
 
         await ctx.defer()
 
-        metadata = await fetch_metadata(platform, url)
+        try:
+            metadata = await fetch_metadata(platform, url)
+        except TweetNotFound:
+            await ctx.send_followup(
+                "That X/Twitter post wasn't found — it may be private or deleted."
+            )
+            return
+        except Exception:
+            message = "Something went wrong fetching that link — please try again."
+            if platform == "TikTok":
+                message += (
+                    " Tip: TikTok often blocks bot access — try a direct "
+                    "tiktok.com/.../video/<id> link."
+                )
+            await ctx.send_followup(message)
+            return
+
         embed = build_embed(metadata)
         source_lines = [f"Source: <{url}>"]
-        file = await downloadable_media_file(metadata)
 
-        if metadata.media_url and not file and metadata.media_kind == "video":
-            source_lines.append(f"Media: {metadata.media_url}")
-
-        kwargs = {"content": "\n".join(source_lines), "embed": embed}
-        if file:
-            kwargs["file"] = file
-
-        await ctx.send_followup(**kwargs)
+        await ctx.send_followup(content="\n".join(source_lines), embed=embed)
 
 
 def setup(bot):
