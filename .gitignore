@@ -10,8 +10,10 @@ config.toml
 config.json
 sfx/
 mcp.json
-.DS_Store
 *.db
+
+# macOS metadata (ignored at every directory depth)
+.DS_Store
 
 # NODE
 # Logs

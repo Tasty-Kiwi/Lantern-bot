@@ -96,13 +96,13 @@ The deployed Worker is `lantern-bot` in the Tasty Kiwi account:
 interactions URL is `https://lantern-bot.tasty-kiwi.workers.dev/interactions`.
 Its runtime bot-token secret is already installed; future deploys retain it.
 
-After committing and pushing the migration branch, open Cloudflare → Tasty Kiwi
-→ Workers & Pages → lantern-bot → Settings → Build/Builds. Connect the GitHub
+Open Cloudflare → Tasty Kiwi → Workers & Pages → lantern-bot → Settings →
+Build/Builds. Connect the GitHub
 repository `Tasty-Kiwi/Lantern-bot` and configure:
 
 | Setting | Value |
 | --- | --- |
-| Production branch | `cf-worker` while working on this branch |
+| Production branch | `master` |
 | Root directory | Repository root (`/`) |
 | Build command | `npm run check` |
 | Deploy command | `npm run deploy` |
@@ -114,11 +114,11 @@ is already configured; it does not need to be added to build variables. Do not
 add command registration to the automatic build: register explicitly when the
 command schema changes.
 
-Every push to the selected production branch runs checks and deploys to the same
-Worker URL. After merging into `master`, change the production branch to
-`master` before deleting `cf-worker`. These dashboard settings are separate
-from the GitHub Actions check workflow; neither the current uncommitted files
-nor a local CLI deployment connects the Git repository automatically.
+Every push to `master` runs checks and deploys to the same Worker URL. If the
+production branch was previously set to `cf-worker`, change it to `master` under
+Branch control. Feature branches do not deploy while preview builds are disabled.
+These dashboard settings are separate from the GitHub Actions check workflow;
+a local CLI deployment does not connect the Git repository automatically.
 See Cloudflare's [build settings](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
 and [branch controls](https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/).
 
