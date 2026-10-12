@@ -5,10 +5,6 @@
 !.dev.vars.example
 .env.*
 !.env.example
-lavalink/
-config.toml
-config.json
-sfx/
 mcp.json
 *.db
 
