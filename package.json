@@ -1,0 +1,32 @@
+{
+  "name": "lantern-bot",
+  "version": "6.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "types": "wrangler types --strict-vars=false",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build",
+    "commands": "node --env-file=.dev.vars scripts/register-commands.ts",
+    "cleanup": "node --env-file=.dev.vars scripts/cleanup-roles.ts"
+  },
+  "dependencies": {
+    "color-name": "^2.1.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.0",
+    "@types/color-name": "^2.0.0",
+    "@types/node": "^22.20.5",
+    "jsonc-parser": "^3.3.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.149.0"
+  }
+}
