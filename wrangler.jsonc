@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lantern-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-12",
+  "workers_dev": true,
+  "secrets": {
+    "required": [
+      "DISCORD_TOKEN"
+    ]
+  },
+  "vars": {
+    "DISCORD_APPLICATION_ID": "823270738633949184",
+    "DISCORD_PUBLIC_KEY": "612d9f4d61cf0cc5f08c7d6d56bbbafca81f8fc563340cf010458cfe93f217f6"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01
+    }
+  },
+  "account_id": "74f486ac4925bc5b7ccaa9fcf865170e"
+}

@@ -1,0 +1,2 @@
+# Existing Discord application's Bot token; never commit the real file.
+DISCORD_TOKEN=replace_me
